@@ -1,0 +1,69 @@
+<svg viewBox="0 0 1000 480" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#101826"/>
+      <stop offset="100%" stop-color="#0b111c"/>
+    </linearGradient>
+    <linearGradient id="accent1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#39ff88"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="accent2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#7c5cff"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#5eead4"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="480" fill="#05070d"/>
+
+  <!-- Incident input -->
+  <rect x="380" y="15" width="240" height="50" rx="10" fill="url(#cardGrad)" stroke="#39ff88" stroke-width="1.5"/>
+  <text x="500" y="45" text-anchor="middle" fill="#39ff88" font-family="Consolas, monospace" font-size="15">Simulated Incident (INC-1024)</text>
+
+  <line x1="500" y1="65" x2="500" y2="95" stroke="#5eead4" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Root agent -->
+  <rect x="360" y="100" width="280" height="60" rx="12" fill="url(#cardGrad)" stroke="url(#accent1)" stroke-width="2"/>
+  <text x="500" y="126" text-anchor="middle" fill="#e5f6ff" font-family="Consolas, monospace" font-size="16" font-weight="700">Root Agent</text>
+  <text x="500" y="146" text-anchor="middle" fill="#8fa3b0" font-family="Consolas, monospace" font-size="12">TrueForge harness &#8226; orchestration</text>
+
+  <!-- split lines to subagents -->
+  <line x1="500" y1="160" x2="260" y2="205" stroke="#5eead4" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="500" y1="160" x2="740" y2="205" stroke="#5eead4" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Subagent 1 -->
+  <rect x="120" y="210" width="280" height="70" rx="12" fill="url(#cardGrad)" stroke="url(#accent2)" stroke-width="1.5"/>
+  <text x="260" y="238" text-anchor="middle" fill="#e5f6ff" font-family="Consolas, monospace" font-size="14" font-weight="700">Subagent: Log &amp; Evidence</text>
+  <text x="260" y="258" text-anchor="middle" fill="#8fa3b0" font-family="Consolas, monospace" font-size="11">correlates logs, timelines, IOCs</text>
+
+  <!-- Subagent 2 -->
+  <rect x="600" y="210" width="280" height="70" rx="12" fill="url(#cardGrad)" stroke="url(#accent2)" stroke-width="1.5"/>
+  <text x="740" y="238" text-anchor="middle" fill="#e5f6ff" font-family="Consolas, monospace" font-size="14" font-weight="700">Subagent: System &amp; Network</text>
+  <text x="740" y="258" text-anchor="middle" fill="#8fa3b0" font-family="Consolas, monospace" font-size="11">host + traffic analysis in sandbox</text>
+
+  <!-- sandbox note -->
+  <rect x="640" y="290" width="200" height="34" rx="8" fill="none" stroke="#7c5cff" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <text x="740" y="311" text-anchor="middle" fill="#b9a6ff" font-family="Consolas, monospace" font-size="11">runs in Daytona sandbox</text>
+  <line x1="740" y1="280" x2="740" y2="290" stroke="#7c5cff" stroke-width="1.5"/>
+
+  <!-- merge lines to risk engine -->
+  <line x1="260" y1="280" x2="500" y2="345" stroke="#5eead4" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="740" y1="324" x2="500" y2="345" stroke="#5eead4" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Risk engine -->
+  <rect x="360" y="350" width="280" height="55" rx="12" fill="url(#cardGrad)" stroke="url(#accent1)" stroke-width="2"/>
+  <text x="500" y="374" text-anchor="middle" fill="#e5f6ff" font-family="Consolas, monospace" font-size="14" font-weight="700">Risk Engine</text>
+  <text x="500" y="393" text-anchor="middle" fill="#8fa3b0" font-family="Consolas, monospace" font-size="11">scores severity &amp; confidence</text>
+
+  <line x1="500" y1="405" x2="500" y2="425" stroke="#5eead4" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- approval gate -->
+  <rect x="330" y="428" width="150" height="42" rx="10" fill="url(#cardGrad)" stroke="#ffb86b" stroke-width="1.6"/>
+  <text x="405" y="454" text-anchor="middle" fill="#ffd8a8" font-family="Consolas, monospace" font-size="12">Human Approval</text>
+
+  <rect x="520" y="428" width="150" height="42" rx="10" fill="url(#cardGrad)" stroke="#39ff88" stroke-width="1.6"/>
+  <text x="595" y="454" text-anchor="middle" fill="#a9ffce" font-family="Consolas, monospace" font-size="12">Audit Trail Log</text>
+</svg>

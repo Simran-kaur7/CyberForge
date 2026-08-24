@@ -1,0 +1,73 @@
+<svg viewBox="0 0 1200 320" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#05070d"/>
+      <stop offset="45%" stop-color="#0b1120"/>
+      <stop offset="100%" stop-color="#0d1a14"/>
+    </linearGradient>
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#39ff88"/>
+      <stop offset="55%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#7c5cff"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1c2b3a" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="320" fill="url(#bgGrad)"/>
+  <rect width="1200" height="320" fill="url(#grid)" opacity="0.5"/>
+  <circle cx="600" cy="150" r="260" fill="url(#glow)"/>
+
+  <!-- circuit traces -->
+  <g stroke="#1f9d6f" stroke-width="1.4" opacity="0.55" fill="none">
+    <path d="M40 40 H180 V90 H320"/>
+    <path d="M40 280 H140 V230 H260 V190"/>
+    <path d="M1160 50 H1020 V100 H900"/>
+    <path d="M1160 270 H1040 V220 H930 V190"/>
+    <path d="M600 20 V60"/>
+    <path d="M600 300 V260"/>
+  </g>
+  <g fill="#39ff88">
+    <circle cx="320" cy="90" r="3.5"/>
+    <circle cx="260" cy="190" r="3.5"/>
+    <circle cx="900" cy="100" r="3.5"/>
+    <circle cx="930" cy="190" r="3.5"/>
+  </g>
+
+  <!-- shield emblem -->
+  <g transform="translate(600,90)" filter="url(#softGlow)">
+    <path d="M0,-46 L40,-30 V6 C40,34 22,52 0,60 C-22,52 -40,34 -40,6 V-30 Z"
+          fill="none" stroke="url(#textGrad)" stroke-width="3.5"/>
+    <path d="M-16,2 L-4,16 L20,-14" fill="none" stroke="#39ff88" stroke-width="4"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- title -->
+  <text x="600" y="215" text-anchor="middle" font-family="Consolas, 'Courier New', monospace"
+        font-size="64" font-weight="700" fill="url(#textGrad)" filter="url(#softGlow)"
+        letter-spacing="2">CyberForge</text>
+
+  <!-- tagline -->
+  <text x="600" y="250" text-anchor="middle" font-family="Consolas, 'Courier New', monospace"
+        font-size="18" fill="#8fa3b0" letter-spacing="3">
+    AUTONOMOUS&#160;AI&#160;SOC&#160;AGENT&#160;&#8226;&#160;BUILT&#160;ON&#160;TRUEFORGE
+  </text>
+
+  <!-- terminal-style caret -->
+  <text x="600" y="285" text-anchor="middle" font-family="Consolas, 'Courier New', monospace"
+        font-size="15" fill="#39ff88" opacity="0.85">
+    &gt; investigating INC-1024_ 
+  </text>
+</svg>
