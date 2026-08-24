@@ -1,0 +1,26 @@
+[
+  {
+    "pid": 4242,
+    "user": "admin",
+    "command": "python3 suspicious.py",
+    "started": "2026-08-24T10:06:35",
+    "parent_pid": 1046,
+    "status": "running"
+  },
+  {
+    "pid": 4243,
+    "user": "admin",
+    "command": "python3 /tmp/update.py",
+    "started": "2026-08-24T10:06:38",
+    "parent_pid": 1047,
+    "status": "running"
+  },
+  {
+    "pid": 1300,
+    "user": "root",
+    "command": "/usr/sbin/sshd",
+    "started": "2026-08-20T08:00:00",
+    "parent_pid": 1,
+    "status": "running"
+  }
+]
