@@ -1,460 +1,149 @@
 <div align="center">
+  <img src="assets/banner.svg" alt="CyberForge - security investigation" width="100%" />
 
-<img src="assets/banner.svg" alt="CyberForge — Security Investigation" width="100%" />
+  <h3>Signal from noise. Confidence before containment.</h3>
+  <p>A local MCP-powered security investigation workspace for evidence correlation, explainable analysis, and human-approved response.</p>
 
-<br/>
-
-⚡ CYBERFORGE
-
-Signal from noise. Confidence before containment.
-
-<p>
-A local MCP-powered security investigation workspace for
-<br/>
-<strong>evidence correlation, explainable analysis, and human-approved response.</strong>
-</p>
-
-<br/>
-
-INVESTIGATE → CORRELATE → ASSESS → APPROVE → CONTAIN
-
+  <code>INVESTIGATE</code> &rarr; <code>CORRELATE</code> &rarr; <code>ASSESS</code> &rarr; <code>APPROVE</code> &rarr; <code>CONTAIN</code>
 </div>
 
-◈ The Mission
+## The mission
 
-Cybersecurity rarely fails because there is no data.
+CyberForge turns a scattered incident trail into a concise, reviewable investigation. It correlates authentication logs, host activity, and network events around a reproducible scenario: `INC-1024`.
 
-It fails because there is too much of it.
-
-CyberForge turns a scattered incident trail into a concise, reviewable investigation.
-
-Authentication logs, host activity, and network events are correlated around a single reproducible scenario — INC-1024.
-
-The objective is deliberately simple:
-
-Give the analyst enough evidence to make a confident containment decision — without giving the agent the final decision.
-
-◈ The Core Idea
-
-                     ┌─────────────────────┐
-                     │     INCIDENT        │
-                     │      INC-1024       │
-                     └──────────┬──────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              │                 │                 │
-              ▼                 ▼                 ▼
-         auth.log         processes.json      network.log
-              │                 │                 │
-              └─────────────────┼─────────────────┘
-                                │
-                                ▼
-                    ┌─────────────────────┐
-                    │  EVIDENCE           │
-                    │  CORRELATION        │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │  RISK FINDINGS      │
-                    │  + EXPLANATION      │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │   HUMAN REVIEW      │
-                    │                     │
-                    │  APPROVE / REJECT   │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ SIMULATED FIREWALL  │
-                    │      ACTION         │
-                    └─────────────────────┘
-
-No blind automation.
-
-Every important conclusion should be traceable back to evidence.
-
-Every containment action should remain behind a human decision.
-
-◈ Investigation Architecture
+The objective is deliberately simple: give an analyst enough evidence to make a confident containment decision without giving the agent the final decision.
 
 <div align="center">
-
-<img src="assets/architecture.svg" alt="CyberForge investigation architecture" width="100%" />
-
+  <img src="assets/pipeline.png" alt="CyberForge investigation pipeline" width="85%" />
 </div>
 
-<br/>
+## Investigation flow
 
-CyberForge uses a lightweight Model Context Protocol (MCP) server as the evidence and action layer.
+<div align="center">
+  <img src="assets/cyberforge_ai_agent_architecture.svg" alt="CyberForge agent and MCP architecture" width="100%" />
+</div>
 
-The tools are intentionally:
+The diagram shows the intended agent workflow. The committed implementation provides its MCP evidence and simulation layer: explicit security capabilities sit between the agent and the local evidence.
 
-small
+```text
+AI / Agent --> MCP --> CyberForge tools --> Evidence layer
+```
 
-composable
+The tools are intentionally small, composable, auditable, reproducible, and easy to test.
 
-auditable
+## Security toolbelt
 
-reproducible
+| Tool | Purpose |
+| --- | --- |
+| `search_security_logs` | Search synthetic authentication events for users, IP addresses, or indicators. |
+| `analyze_evidence` | Correlate authentication, process, and network evidence into an incident narrative. |
+| `check_system_activity` | Inspect simulated processes and active network connections. |
+| `block_ip` | Record a simulated firewall containment action after explicit human approval. |
 
-easy to test
+> [!WARNING]
+> `block_ip` is a simulation. It only modifies this repository's local firewall data. It does not block traffic on the host machine or an external network. A production deployment must require authentication, authorization, approval, and audit controls before containment.
 
-🔎 Security Toolbelt
+## Demo incident: `INC-1024`
 
-Tool
+<div align="center">
+  <img src="assets/incident_signal_chain.svg" alt="INC-1024 incident signal chain" width="90%" />
+</div>
 
-Purpose
+`INC-1024` models an SSH brute-force sequence associated with `10.0.0.25` that progresses through the following signals:
 
-search_security_logs
+| Stage | Observed signal |
+| --- | --- |
+| 1. SSH brute force | Repeated authentication failures. |
+| 2. Successful login | A successful login from `10.0.0.25`. |
+| 3. Host activity | `suspicious.py` executes on the host. |
+| 4. Network signal | A TCP connection is established on port `4444`. |
+| 5. Human review | Evidence is reviewed before any containment decision. |
 
-Search authentication events for users, IPs, indicators, or suspicious activity.
+The evidence is committed locally, making the scenario repeatable: **inspect -> replay -> analyze -> compare**.
 
-analyze_evidence
+## Evidence correlation
 
-Correlate authentication, process, and network evidence into an incident narrative.
+<div align="center">
+  <img src="assets/incident_evidence_correlation.svg" alt="Evidence correlation across authentication, process, and network signals" width="90%" />
+</div>
 
-check_system_activity
+| Evidence source | Signal |
+| --- | --- |
+| Authentication log | 45 failed attempts, then 3 successful logins from `10.0.0.25`. |
+| Host | `python3 suspicious.py` running as `admin` immediately after login. |
+| Network | A TCP connection on port `4444`, correlated with the host activity. |
 
-Inspect simulated processes and active network connections.
+The strength of the investigation comes from correlation, not a single event. A failed login can be noise; a connected sequence of login, process, and network activity is a stronger incident signal.
 
-block_ip
+## Human in the loop
 
-Record a simulated firewall containment action after explicit human approval.
+```text
+OBSERVATION --> ANALYSIS --> RECOMMENDATION --> HUMAN DECISION --> ACTION
+```
 
-[!WARNING]
-block_ip represents a containment-style operation.
+CyberForge can investigate evidence, correlate security events, explain observed signals, and recommend a response. Containment remains a human decision.
 
-In CyberForge, it only modifies local simulated firewall data.
+## Quick start
 
-A real deployment should place authentication, authorization, approval, and audit controls in front of every such action.
+### Requirements
 
-◈ Incident INC-1024
+| Dependency | Version / purpose |
+| --- | --- |
+| Node.js | 20 or newer; runs the MCP server. |
+| Python | 3.x; runs the local evidence-analysis tools. |
+| MCP-compatible client | Connects to the server over standard input/output. |
 
-CyberForge ships with a reproducible synthetic incident.
+### Install and start
 
-┌───────────────────────────┐
-│  01  SSH BRUTE FORCE      │
-│      Repeated failures    │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│  02  SUCCESSFUL LOGIN     │
-│      10.0.0.25            │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│  03  HOST ACTIVITY        │
-│      suspicious.py        │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│  04  NETWORK SIGNAL       │
-│      TCP :4444            │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│  05  HUMAN REVIEW         │
-│      Review → Decide      │
-└───────────────────────────┘
-
-The scenario models an SSH brute-force sequence that progresses into a successful login, suspicious host activity, and an unusual network connection.
-
-The underlying evidence is committed locally so the investigation can be:
-
-INSPECT → REPLAY → ANALYZE → COMPARE
-
-◈ Evidence Layer
-
-CyberForge currently works with three primary evidence sources:
-
-                  INCIDENT EVIDENCE
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-        ▼                ▼                ▼
-     AUTH LOG         PROCESS DATA      NETWORK DATA
-        │                │                │
-        ▼                ▼                ▼
-    Who logged in?   What executed?   Where did it connect?
-        │                │                │
-        └────────────────┼────────────────┘
-                         ▼
-                  CORRELATED SIGNAL
-
-Authentication
-
-45 failed attempts
-        ↓
-3 successful logins
-        ↓
-source: 10.0.0.25
-
-Host
-
-python3 suspicious.py
-        ↓
-running as admin
-        ↓
-started after successful login
-
-Network
-
-TCP :4444
-        ↓
-established connection
-        ↓
-correlated with host activity
-
-The strength of the investigation comes from correlation, not from any single event.
-
-◈ Human-in-the-Loop
-
-CyberForge intentionally separates:
-
-OBSERVATION
-     ↓
-ANALYSIS
-     ↓
-RECOMMENDATION
-     ↓
-HUMAN DECISION
-     ↓
-ACTION
-
-The agent can investigate.
-
-The agent can correlate.
-
-The agent can recommend.
-
-But:
-
-Containment remains a human decision.
-
-This boundary is one of the project's core security principles.
-
-◈ Quick Start
-
-Requirements
-
-Node.js 20+
-
-Python 3.x
-
-Git
-
-An MCP-compatible client
-
-Install
-
+```bash
+# Install MCP server dependencies
 npm install
 
-Start the MCP server
-
+# Start the MCP server over standard input/output
 npm run mcp
+```
 
-The server communicates through standard input/output.
+The Python tools currently use only the standard library, so no Python package installation is required.
 
-Connect it through an MCP-compatible client.
+### Run the investigation manually
 
-◈ Run the Investigation Manually
-
-Correlate the complete incident
-
+```bash
+# Correlate the demo incident
 python mcp_server/tools/analyze_evidence.py
 
-Search authentication events
-
+# Search authentication events for the suspicious address
 python mcp_server/tools/search_security_logs.py 10.0.0.25
 
-Inspect host and network activity
-
+# Inspect simulated host and network activity
 python mcp_server/tools/check_system_activity.py
 
-Simulate containment
+# Simulate containment (writes only local fixture data)
+python mcp_server/tools/block_ip.py
+```
 
-python mcp_server/tools/block_ip.py 10.0.0.25
+## Project map
 
-This operation modifies only the project's simulated firewall state.
-
-◈ Project Architecture
-
+```text
 CyberForge/
-│
-├── assets/
-│   ├── banner.svg
-│   └── architecture.svg
-│
-├── mcp_server/
-│   ├── server.js
-│   │
-│   ├── tools/
-│   │   ├── analyze_evidence.py
-│   │   ├── block_ip.py
-│   │   ├── check_system_activity.py
-│   │   └── search_security_logs.py
-│   │
-│   └── data/
-│       ├── auth.log
-│       ├── network.log
-│       ├── processes.json
-│       └── simulated_firewall.json
-│
-├── agent/
-│   └── prompts/
-│
-├── app/
-│   └── api/
-│
-├── frontend/
-│
-├── tests/
-│
-├── docs/
-│
-├── package.json
-├── package-lock.json
-├── requirements.txt
-└── README.md
+|- assets/                 Local README artwork and diagrams
+|- mcp_server/
+|  |- server.js            MCP tool registration
+|  |- tools/               Python investigation and simulation tools
+|  `- data/                Committed synthetic evidence
+|- agent/                  Agent design and risk-scoring space
+|- app/                    API application space
+`- frontend/               Investigation interface space
+```
 
-◈ Design Principles
+## Design principles
 
-01 — Evidence First
+1. **Evidence first** - every conclusion needs evidence behind it.
+2. **Correlation over isolation** - a sequence of related events is stronger than one event alone.
+3. **Explain before act** - the system should explain why an incident is suspicious before recommending containment.
+4. **Human before containment** - high-impact actions require human approval.
+5. **Reproducible by design** - committed evidence should reproduce the same investigation scenario.
+6. **Inspectable infrastructure** - logs, tools, evidence, and simulated actions remain visible.
 
-No conclusion should exist without evidence behind it.
+## License
 
-02 — Correlation Over Isolation
-
-A failed login alone is noise.
-
-A failed login → successful login → suspicious process → unusual connection is a signal.
-
-03 — Explain Before Act
-
-The system should explain why it believes an incident is suspicious before recommending containment.
-
-04 — Human Before Containment
-
-High-impact actions require human approval.
-
-05 — Reproducible by Design
-
-The same evidence should produce the same investigation scenario.
-
-06 — Inspectable Infrastructure
-
-Logs, tools, data, and decisions should remain visible to the developer and analyst.
-
-◈ Why MCP?
-
-MCP gives CyberForge a clean boundary between the intelligence layer and the security environment.
-
-┌───────────────────────────┐
-│        AI / AGENT         │
-│                           │
-│ Investigate               │
-│ Correlate                 │
-│ Assess                    │
-└─────────────┬─────────────┘
-              │
-              │ MCP
-              ▼
-┌───────────────────────────┐
-│      CYBERFORGE TOOLS     │
-│                           │
-│ Search                    │
-│ Analyze                   │
-│ Inspect                   │
-│ Contain                   │
-└─────────────┬─────────────┘
-              │
-              ▼
-┌───────────────────────────┐
-│       EVIDENCE LAYER      │
-│                           │
-│ Logs / Processes / Network│
-└───────────────────────────┘
-
-The result is a security workspace where the agent doesn't need unrestricted access to everything.
-
-It gets specific capabilities through explicit tool contracts.
-
-◈ Development Roadmap
-
-PHASE 01
-████████████████████  Foundation
-MCP + synthetic evidence + tooling
-
-PHASE 02
-████████████░░░░░░░░  Intelligence
-Agent + subagents + investigation
-
-PHASE 03
-████████░░░░░░░░░░░░  Assessment
-Risk scoring + evidence correlation
-
-PHASE 04
-████░░░░░░░░░░░░░░░░  Control
-Human approval + containment
-
-PHASE 05
-██░░░░░░░░░░░░░░░░░░  Interface
-Investigation dashboard + timeline
-
-◈ Built to Be Inspectable
-
-CyberForge deliberately avoids the "black-box AI hacker" approach.
-
-Instead:
-
-Evidence
-   ↓
-Tool
-   ↓
-Finding
-   ↓
-Explanation
-   ↓
-Human
-   ↓
-Action
-
-The evidence is committed locally.
-
-The tool contracts are explicit.
-
-The investigation scenario is reproducible.
-
-The containment operation is simulated.
-
-And the human remains in control.
-
-<div align="center">
-
-⚡ Signal from noise.
-
-Confidence before containment.
-
-<br/>
-
-INVESTIGATE · CORRELATE · ASSESS · APPROVE · CONTAIN
-
-<br/>
-
-CyberForge
-
-<sub>Security investigation • MCP • Human-in-the-loop • Reproducible evidence</sub>
-
-</div>
-
-License
-
-Released under the MIT License.
+Released under the [MIT License](LICENSE).
