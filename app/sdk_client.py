@@ -10,13 +10,19 @@ TOOLS_DIR = PROJECT_ROOT / "mcp_server" / "tools"
 def run_tool(script_name: str, *args: str) -> dict:
     script_path = TOOLS_DIR / script_name
 
-    result = subprocess.run(
-        ["python3", str(script_path), *args],
-        cwd=TOOLS_DIR,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["python3", str(script_path), *args],
+            cwd=TOOLS_DIR,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"{script_name} timed out after 15 seconds"
+        ) from exc
 
     if result.returncode != 0:
         raise RuntimeError(
@@ -29,7 +35,6 @@ def run_tool(script_name: str, *args: str) -> dict:
         raise RuntimeError(
             f"{script_name} returned invalid JSON"
         ) from exc
-
 
 def analyze_evidence() -> dict:
     return run_tool("analyze_evidence.py")
