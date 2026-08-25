@@ -138,51 +138,79 @@
     setTimeout(() => el.remove(), 3500);
   }
 
-  // ---- mock scenario data (placeholder until backend wiring lands) ----
-  const scenarios = {
-    'INC-1024': {
-      desc:'Suspicious SSH Activity · flagged by perimeter log monitor',
-      risk:'high', score:87, source:'203.0.113.44', host:'PROD-WEB-02', seen:'04m ago',
-      evidence:[
-        { tag:'[AUTH]', level:'crit', text:'14 failed SSH logins for user "admin" from 203.0.113.44 in 60s' },
-        { tag:'[AUTH]', level:'crit', text:'Successful login from 203.0.113.44 immediately following failures' },
-        { tag:'[SYS]',  level:'warn', text:'New sudoers entry created 40s after login' },
-        { tag:'[NET]',  level:'warn', text:'Outbound connection opened to unrecognised IP on port 4444' },
-      ],
-      explain:[
-        { label:'Brute-force pattern match', weight:92, level:'high' },
-        { label:'Privilege escalation signal', weight:78, level:'high' },
-        { label:'Anomalous outbound connection', weight:64, level:'' },
-        { label:'Host baseline deviation', weight:31, level:'low' },
-      ],
-      note:'Pattern consistent with brute-force compromise followed by privilege escalation. Recommend blocking source IP.'
-    },
-    'INC-1025': {
-      desc:'Unusual Network Activity · flagged by traffic baseline monitor',
-      risk:'medium', score:54, source:'10.0.4.19', host:'WKS-114', seen:'21m ago',
-      evidence:[
-        { tag:'[NET]', level:'warn', text:'Sustained 3x baseline outbound traffic from host WKS-114' },
-        { tag:'[NET]', level:'', text:'Destination is a known CDN edge node' },
-        { tag:'[SYS]', level:'', text:'No new processes or auth anomalies on host in same window' },
-      ],
-      explain:[
-        { label:'Traffic volume deviation', weight:58, level:'' },
-        { label:'Destination reputation', weight:12, level:'low' },
-        { label:'Host process anomalies', weight:8, level:'low' },
-      ],
-      note:'Traffic volume is elevated but destination and host state look benign. Recommend monitoring before action.'
+  // ---- backend investigation state ----
+  let investigationData = null;
+
+  function calculateRiskScore(data){
+    const indicators = data?.analysis?.risk_indicators || {};
+    let score = 0;
+
+    if ((indicators.failed_attempts || 0) >= 20) score += 35;
+    else if ((indicators.failed_attempts || 0) >= 10) score += 25;
+    else if ((indicators.failed_attempts || 0) > 0) score += 10;
+
+    if (indicators.successful_suspicious_login) score += 25;
+    if (indicators.suspicious_process) score += 20;
+    if (indicators.unusual_connection) score += 20;
+
+    return Math.min(score, 100);
+  }
+
+  function riskFromScore(score){
+    if (score >= 70) return 'high';
+    if (score >= 40) return 'medium';
+    return 'low';
+  }
+
+  function riskLabelFromLevel(level){
+    return { high:'High Risk', medium:'Medium Risk', low:'Low Risk' }[level];
+  }
+
+  function buildEvidence(data){
+    const evidence = [];
+    const analysis = data?.analysis || {};
+    const auth = data?.authentication || {};
+    const activity = data?.system_activity || {};
+
+    (analysis.findings || []).forEach((finding, index) => {
+      evidence.push({
+        tag: index < 2 ? '[AUTH]' : '[SYS]',
+        level: index < 2 ? 'crit' : 'warn',
+        text: finding
+      });
+    });
+
+    if ((auth.failed_logins || 0) > 0) {
+      evidence.unshift({
+        tag:'[AUTH]',
+        level:'crit',
+        text:`${auth.failed_logins} failed SSH logins associated with ${data?.analysis?.source_ip || 'the source IP'}`
+      });
     }
-  };
-  const scenario = scenarios[incidentId] || scenarios['INC-1024'];
-  document.getElementById('incident-desc').textContent = scenario.desc;
-  document.getElementById('stat-source').textContent = scenario.source;
-  document.getElementById('stat-host').textContent = scenario.host;
-  document.getElementById('stat-seen').textContent = scenario.seen;
+
+    (activity.unusual_connections || []).forEach(connection => {
+      evidence.push({
+        tag:'[NET]',
+        level:'warn',
+        text:`Unusual network connection detected: ${connection}`
+      });
+    });
+
+    return evidence;
+  }
+
+  function buildExplain(data, score){
+    const indicators = data?.analysis?.risk_indicators || {};
+    const failed = Math.min(100, Math.round((indicators.failed_attempts || 0) / 45 * 100));
+    return [
+      { label:'Brute-force pattern match', weight:failed, level:failed >= 70 ? 'high' : '' },
+      { label:'Suspicious successful login', weight:indicators.successful_suspicious_login ? 90 : 10, level:indicators.successful_suspicious_login ? 'high' : 'low' },
+      { label:'Suspicious process signal', weight:indicators.suspicious_process ? 80 : 10, level:indicators.suspicious_process ? 'high' : 'low' },
+      { label:'Unusual network connection', weight:indicators.unusual_connection ? 75 : 10, level:indicators.unusual_connection ? '' : 'low' }
+    ];
+  }
 
   const riskBadge = document.getElementById('header-risk-badge');
-  const riskClass = { high:'risk-high', medium:'risk-medium', low:'risk-low' }[scenario.risk];
-  const riskLabel = { high:'High Risk', medium:'Medium Risk', low:'Low Risk' }[scenario.risk];
-
   const investigateBtn = document.getElementById('investigate-button');
   const evidencePanel = document.getElementById('evidence-panel');
   const timeline = document.getElementById('timeline');
@@ -228,52 +256,93 @@
       timeline.appendChild(li);
     });
 
-    const evidenceQueue = [...scenario.evidence];
-    let firstLine = true;
+    try {
+      const response = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/investigate`);
+      const data = await response.json();
 
-    for (let i = 0; i < steps.length - 1; i++) {
-      const li = document.getElementById(`step-${steps[i].id}`);
-      li.classList.add('active');
-      await sleep(500);
-      li.classList.remove('active');
-      li.classList.add('done');
-      if (steps[i].id === 'log' || steps[i].id === 'net') {
-        const line = evidenceQueue.shift();
-        if (line) {
-          if (firstLine) { evidencePanel.innerHTML = ''; firstLine = false; }
-          appendEvidence(line);
+      if (!response.ok || !data.success) {
+        throw new Error(data.detail || 'Investigation request failed');
+      }
+
+      investigationData = data;
+
+      const score = calculateRiskScore(data);
+      const risk = riskFromScore(score);
+      const riskClass = { high:'risk-high', medium:'risk-medium', low:'risk-low' }[risk];
+      const riskLabel = riskLabelFromLevel(risk);
+      const sourceIp = data.analysis?.source_ip || '—';
+      const evidence = buildEvidence(data);
+      const explain = buildExplain(data, score);
+
+      document.getElementById('stat-source').textContent = sourceIp;
+      document.getElementById('stat-host').textContent = '—';
+      document.getElementById('stat-seen').textContent = 'Just now';
+
+      let firstLine = true;
+
+      for (let i = 0; i < steps.length - 1; i++) {
+        const li = document.getElementById(`step-${steps[i].id}`);
+        li.classList.add('active');
+        await sleep(500);
+        li.classList.remove('active');
+        li.classList.add('done');
+
+        if (steps[i].id === 'log' || steps[i].id === 'net') {
+          const line = evidence.shift();
+          if (line) {
+            if (firstLine) {
+              evidencePanel.innerHTML = '';
+              firstLine = false;
+            }
+            appendEvidence(line);
+          }
         }
       }
-    }
-    if (firstLine) evidencePanel.innerHTML = '';
-    evidenceQueue.forEach(appendEvidence);
 
-    riskBadge.textContent = riskLabel;
-    riskBadge.className = `risk-badge ${riskClass}`;
-    gaugeArc.style.stroke = scenario.risk === 'high' ? 'var(--ember-red)' : scenario.risk === 'medium' ? 'var(--ember)' : 'var(--spark)';
-    const offset = CIRC - (CIRC * scenario.score / 100);
-    requestAnimationFrame(() => { gaugeArc.style.strokeDashoffset = offset; });
-    gaugeValue.textContent = scenario.score;
-    riskNote.textContent = scenario.note;
+      if (firstLine) evidencePanel.innerHTML = '';
+      evidence.forEach(appendEvidence);
 
-    scenario.explain.forEach((f, idx) => {
-      const li = document.createElement('li');
-      li.className = 'explain-item';
-      li.innerHTML = `
-        <div class="explain-item-head"><span>${f.label}</span><span>${f.weight}%</span></div>
-        <div class="explain-bar-track"><div class="explain-bar-fill ${f.level}" id="ebar-${idx}"></div></div>`;
-      explainList.appendChild(li);
-      requestAnimationFrame(() => {
-        setTimeout(() => { document.getElementById(`ebar-${idx}`).style.width = f.weight + '%'; }, 60 * idx);
+      riskBadge.textContent = riskLabel;
+      riskBadge.className = `risk-badge ${riskClass}`;
+      gaugeArc.style.stroke =
+        risk === 'high' ? 'var(--ember-red)' :
+        risk === 'medium' ? 'var(--ember)' : 'var(--spark)';
+
+      const offset = CIRC - (CIRC * score / 100);
+      requestAnimationFrame(() => { gaugeArc.style.strokeDashoffset = offset; });
+      gaugeValue.textContent = score;
+
+      const findings = data.analysis?.findings || [];
+      riskNote.textContent = findings.length
+        ? findings.join(' ')
+        : 'Investigation completed with no additional findings.';
+
+      explain.forEach((f, idx) => {
+        const li = document.createElement('li');
+        li.className = 'explain-item';
+        li.innerHTML = `
+          <div class="explain-item-head"><span>${f.label}</span><span>${f.weight}%</span></div>
+          <div class="explain-bar-track"><div class="explain-bar-fill ${f.level}" id="ebar-${idx}"></div></div>`;
+        explainList.appendChild(li);
+        requestAnimationFrame(() => {
+          setTimeout(() => {
+            document.getElementById(`ebar-${idx}`).style.width = f.weight + '%';
+          }, 60 * idx);
+        });
       });
-    });
 
-    document.getElementById('step-gate').classList.add('active');
+      document.getElementById('step-gate').classList.add('active');
 
-    investigateBtn.textContent = 'Investigation Complete';
-    approveBtn.disabled = false;
-    rejectBtn.disabled = false;
-    toast('Investigation complete — awaiting your decision', 'success');
+      investigateBtn.textContent = 'Investigation Complete';
+      approveBtn.disabled = false;
+      rejectBtn.disabled = false;
+      toast('Investigation complete — awaiting your decision', 'success');
+    } catch (error) {
+      investigateBtn.disabled = false;
+      investigateBtn.textContent = 'Investigate Incident';
+      evidencePanel.innerHTML = '<p class="evidence-placeholder">Investigation could not be completed.</p>';
+      toast(error.message || 'Investigation failed', 'error');
+    }
   }
 
   function appendEvidence(line){
@@ -306,12 +375,14 @@
   });
 
   copyBtn.addEventListener('click', async () => {
+    const riskScore = investigationData ? calculateRiskScore(investigationData) : null;
+    const riskLevel = riskScore === null ? null : riskFromScore(riskScore);
     const summary = {
       incident: incidentId,
-      risk_score: scenario.score,
-      risk_level: scenario.risk,
-      source_ip: scenario.source,
-      affected_host: scenario.host,
+      risk_score: riskScore,
+      risk_level: riskLevel,
+      source_ip: investigationData?.analysis?.source_ip || null,
+      affected_host: null,
       decision: decision,
       timestamp: new Date().toISOString()
     };
@@ -379,4 +450,4 @@
 </script>
 
 </body>
-</html>
+</html>ss -ltnp | grep :8000
