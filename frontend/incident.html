@@ -3,9 +3,196 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
+    <title>CyberForge — Incident Investigation</title>
 </head>
 <body>
-    <p>yo yo honey singh</p>
+
+    <header>
+        <h1>⚡ CYBERFORGE</h1>
+        <p>Security Investigation Workspace</p>
+    </header>
+
+
+    <main>
+
+        <!-- Incident Header -->
+        <section>
+            <h2>Incident Investigation</h2>
+
+            <p>
+                Incident ID:
+                <strong id="incident-id">INC-1024</strong>
+            </p>
+
+            <button id="investigate-button">
+                Investigate Incident
+            </button>
+        </section>
+
+
+        <hr>
+
+
+        <!-- Evidence Panel -->
+        <section>
+            <h2>Evidence</h2>
+
+            <div id="evidence-panel">
+                <p>
+                    Evidence collected by the investigation
+                    agent will appear here.
+                </p>
+            </div>
+        </section>
+
+
+        <hr>
+
+
+        <!-- Risk Score -->
+        <section>
+            <h2>Risk Score</h2>
+
+            <div id="risk-score">
+                <p>
+                    Risk score will appear after investigation.
+                </p>
+            </div>
+        </section>
+
+
+        <hr>
+
+
+        <!-- Agent Timeline -->
+        <section>
+            <h2>Agent Activity Timeline</h2>
+
+            <div id="timeline">
+
+                <p>
+                    <strong>Waiting...</strong>
+                </p>
+
+                <p>
+                    Agent investigation events will appear here.
+                </p>
+
+            </div>
+        </section>
+
+
+        <hr>
+
+
+        <!-- Response / Approval -->
+        <section>
+            <h2>Response</h2>
+
+            <p>
+                Potential response actions require human approval.
+            </p>
+
+            <button id="approve-button">
+                APPROVE
+            </button>
+
+            <button id="reject-button">
+                REJECT
+            </button>
+        </section>
+
+
+        <hr>
+
+
+        <!-- Previously Investigated -->
+        <section>
+            <h2>Previously Investigated Incidents</h2>
+
+            <ul>
+
+                <li>
+                    INC-1001
+                    <button onclick="openIncident('INC-1001')">
+                        Reopen
+                    </button>
+                </li>
+
+                <li>
+                    INC-1002
+                    <button onclick="openIncident('INC-1002')">
+                        Reopen
+                    </button>
+                </li>
+
+                <li>
+                    INC-1003
+                    <button onclick="openIncident('INC-1003')">
+                        Reopen
+                    </button>
+                </li>
+
+            </ul>
+        </section>
+
+    </main>
+
+
+    <script>
+
+        // Get incident ID from URL
+        const params = new URLSearchParams(window.location.search);
+
+        const incidentId =
+            params.get("id") || "INC-1024";
+
+        document.getElementById("incident-id").textContent =
+            incidentId;
+
+
+        // Temporary placeholder actions
+        document
+            .getElementById("investigate-button")
+            .addEventListener("click", function () {
+
+                alert(
+                    `Investigation started for ${incidentId}`
+                );
+
+            });
+
+
+        document
+            .getElementById("approve-button")
+            .addEventListener("click", function () {
+
+                alert(
+                    "Approval requested. Backend integration coming next."
+                );
+
+            });
+
+
+        document
+            .getElementById("reject-button")
+            .addEventListener("click", function () {
+
+                alert(
+                    "Response rejected."
+                );
+
+            });
+
+
+        function openIncident(id) {
+
+            window.location.href =
+                `incident.html?id=${id}`;
+
+        }
+
+    </script>
+
 </body>
 </html>
