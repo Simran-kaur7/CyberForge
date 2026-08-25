@@ -19,7 +19,13 @@ def investigate_incident(incident_id: str):
         )
 
     analysis = analyze_evidence()
-    source_ip = analysis.get("source_ip", "")
+    source_ip = analysis.get("source_ip")
+
+    if not source_ip:
+        raise HTTPException(
+            status_code=502,
+            detail="Evidence analysis did not return a source IP.",
+        )
 
     logs = search_security_logs(source_ip)
     activity = check_system_activity()
