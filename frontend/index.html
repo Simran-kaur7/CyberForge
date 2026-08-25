@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberForge — Security Investigations</title>
+</head>
+<body>
+
+    <header>
+        <h1>⚡ CYBERFORGE</h1>
+        <p>Security Investigation Workspace</p>
+    </header>
+
+    <main>
+
+        <section>
+            <h2>Active Incidents</h2>
+
+            <div>
+                <h3>INC-1024</h3>
+                <p>Suspicious SSH Activity</p>
+                <p>Risk: <strong>HIGH</strong></p>
+                <button onclick="openIncident('INC-1024')">
+                    Open Incident
+                </button>
+            </div>
+
+            <hr>
+
+            <div>
+                <h3>INC-1025</h3>
+                <p>Unusual Network Activity</p>
+                <p>Risk: <strong>MEDIUM</strong></p>
+                <button onclick="openIncident('INC-1025')">
+                    Open Incident
+                </button>
+            </div>
+        </section>
+
+
+        <section>
+            <h2>Previously Investigated Incidents</h2>
+
+            <ul>
+                <li>
+                    INC-1001 —
+                    <button onclick="openIncident('INC-1001')">
+                        Reopen
+                    </button>
+                </li>
+
+                <li>
+                    INC-1002 —
+                    <button onclick="openIncident('INC-1002')">
+                        Reopen
+                    </button>
+                </li>
+
+                <li>
+                    INC-1003 —
+                    <button onclick="openIncident('INC-1003')">
+                        Reopen
+                    </button>
+                </li>
+            </ul>
+        </section>
+
+    </main>
+
+    <script>
+        function openIncident(incidentId) {
+            window.location.href =
+                `incident.html?id=${incidentId}`;
+        }
+    </script>
+
+</body>
+</html>
