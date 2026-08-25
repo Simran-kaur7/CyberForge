@@ -1,0 +1,260 @@
+/* =========================================
+   CYBERFORGE — Day 1 Frontend Scaffold
+   ========================================= */
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: Arial, Helvetica, sans-serif;
+    background: #0b0f14;
+    color: #e6edf3;
+    min-height: 100vh;
+}
+
+/* ---------- Header ---------- */
+
+header {
+    border-bottom: 1px solid #26313d;
+    padding: 24px 40px;
+    background: #0d131a;
+}
+
+header h1 {
+    font-size: 28px;
+    letter-spacing: 2px;
+}
+
+header p {
+    margin-top: 6px;
+    color: #8b98a7;
+}
+
+/* ---------- Main ---------- */
+
+main {
+    width: min(1200px, 92%);
+    margin: 40px auto;
+}
+
+section {
+    background: #111820;
+    border: 1px solid #26313d;
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 24px;
+}
+
+section h2 {
+    margin-bottom: 20px;
+    font-size: 20px;
+}
+
+section h3 {
+    margin-bottom: 8px;
+}
+
+/* ---------- Incident Cards ---------- */
+
+.incident-card {
+    background: #0d131a;
+    border: 1px solid #26313d;
+    border-radius: 8px;
+    padding: 18px;
+    margin-bottom: 14px;
+}
+
+.incident-card:last-child {
+    margin-bottom: 0;
+}
+
+.incident-card p {
+    color: #9ba8b5;
+    margin: 6px 0;
+}
+
+/* ---------- Risk ---------- */
+
+.risk-high {
+    color: #ff6b6b;
+    font-weight: bold;
+}
+
+.risk-medium {
+    color: #f2c94c;
+    font-weight: bold;
+}
+
+.risk-low {
+    color: #6fcf97;
+    font-weight: bold;
+}
+
+/* ---------- Buttons ---------- */
+
+button {
+    border: 1px solid #3a4653;
+    background: #17212b;
+    color: #e6edf3;
+    padding: 9px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-top: 10px;
+}
+
+button:hover {
+    background: #202d39;
+}
+
+/* ---------- Investigation Button ---------- */
+
+#investigate-button {
+    background: #1d4ed8;
+    border-color: #2563eb;
+    font-weight: bold;
+}
+
+#investigate-button:hover {
+    background: #2563eb;
+}
+
+/* ---------- Evidence ---------- */
+
+#evidence-panel {
+    min-height: 120px;
+    background: #0b1016;
+    border: 1px dashed #344250;
+    border-radius: 8px;
+    padding: 18px;
+    color: #8b98a7;
+}
+
+.evidence-item {
+    padding: 10px 0;
+    border-bottom: 1px solid #26313d;
+}
+
+.evidence-item:last-child {
+    border-bottom: none;
+}
+
+/* ---------- Risk Score ---------- */
+
+#risk-score {
+    min-height: 100px;
+    background: #0b1016;
+    border: 1px dashed #344250;
+    border-radius: 8px;
+    padding: 18px;
+    color: #8b98a7;
+}
+
+.risk-score-value {
+    font-size: 36px;
+    font-weight: bold;
+}
+
+/* ---------- Timeline ---------- */
+
+#timeline {
+    background: #0b1016;
+    border-radius: 8px;
+    padding: 18px;
+    min-height: 150px;
+}
+
+.timeline-item {
+    padding: 12px;
+    margin-bottom: 10px;
+    border-left: 3px solid #3a4653;
+    background: #111820;
+}
+
+.timeline-item strong {
+    display: block;
+    margin-bottom: 4px;
+}
+
+.timeline-item span {
+    color: #8b98a7;
+    font-size: 13px;
+}
+
+/* ---------- Response ---------- */
+
+#approve-button {
+    background: #166534;
+    border-color: #22c55e;
+}
+
+#approve-button:hover {
+    background: #15803d;
+}
+
+#reject-button {
+    background: #7f1d1d;
+    border-color: #ef4444;
+}
+
+#reject-button:hover {
+    background: #991b1b;
+}
+
+/* ---------- Previously Investigated ---------- */
+
+ul {
+    list-style: none;
+}
+
+li {
+    padding: 12px;
+    margin-bottom: 10px;
+    background: #0d131a;
+    border: 1px solid #26313d;
+    border-radius: 6px;
+}
+
+li button {
+    margin-left: 12px;
+}
+
+/* ---------- Incident ID ---------- */
+
+#incident-id {
+    color: #60a5fa;
+}
+
+/* ---------- Horizontal Divider ---------- */
+
+hr {
+    border: none;
+    border-top: 1px solid #26313d;
+    margin: 24px 0;
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 700px) {
+
+    header {
+        padding: 20px;
+    }
+
+    main {
+        width: 94%;
+        margin: 25px auto;
+    }
+
+    section {
+        padding: 18px;
+    }
+
+    header h1 {
+        font-size: 23px;
+    }
+
+}
