@@ -6,6 +6,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = PROJECT_ROOT / "mcp_server" / "tools"
 
+TOOL_TIMEOUT_SECONDS = 15
+MAX_ERROR_OUTPUT = 500
+
 
 def run_tool(script_name: str, *args: str) -> dict:
     script_path = TOOLS_DIR / script_name
@@ -17,16 +20,35 @@ def run_tool(script_name: str, *args: str) -> dict:
             capture_output=True,
             text=True,
             check=False,
-            timeout=15,
+            timeout=TOOL_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
+        stdout = (exc.stdout or "").strip()
+        stderr = (exc.stderr or "").strip()
+
+        details = []
+
+        if args:
+            details.append(f"args={args}")
+
+        if stdout:
+            details.append(f"stdout={stdout[-MAX_ERROR_OUTPUT:]}")
+
+        if stderr:
+            details.append(f"stderr={stderr[-MAX_ERROR_OUTPUT:]}")
+
+        context = "; ".join(details)
+
         raise RuntimeError(
-            f"{script_name} timed out after 15 seconds"
+            f"{script_name} timed out after "
+            f"{TOOL_TIMEOUT_SECONDS} seconds"
+            + (f" ({context})" if context else "")
         ) from exc
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"{script_name} failed: {result.stderr.strip() or result.stdout.strip()}"
+            f"{script_name} failed: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
         )
 
     try:
@@ -35,6 +57,7 @@ def run_tool(script_name: str, *args: str) -> dict:
         raise RuntimeError(
             f"{script_name} returned invalid JSON"
         ) from exc
+
 
 def analyze_evidence() -> dict:
     return run_tool("analyze_evidence.py")

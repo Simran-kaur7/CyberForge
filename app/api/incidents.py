@@ -18,17 +18,35 @@ def investigate_incident(incident_id: str):
             detail=f"Incident {incident_id} is not available in the demo evidence set.",
         )
 
-    analysis = analyze_evidence()
-    source_ip = analysis.get("source_ip")
+    try:
+        analysis = analyze_evidence()
+        source_ip = analysis.get("source_ip")
 
-    if not source_ip:
+        if not source_ip:
+            raise HTTPException(
+                status_code=502,
+                detail="Evidence analysis did not return a source IP.",
+            )
+
+        logs = search_security_logs(source_ip)
+        activity = check_system_activity()
+
+    except HTTPException:
+        raise
+
+    except RuntimeError as exc:
+        message = str(exc)
+
+        if "timed out after" in message:
+            raise HTTPException(
+                status_code=504,
+                detail="Security investigation tool timed out.",
+            ) from exc
+
         raise HTTPException(
             status_code=502,
-            detail="Evidence analysis did not return a source IP.",
-        )
-
-    logs = search_security_logs(source_ip)
-    activity = check_system_activity()
+            detail="Security investigation tool failed.",
+        ) from exc
 
     return {
         "success": True,
