@@ -1,96 +1,230 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="style.css">
-    <title>CyberForge — Security Investigations</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CyberForge — Security Investigations</title>
+<meta name="description" content="Autonomous SOC investigation agent dashboard">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
 </head>
-
 <body>
 
-    <header>
-        <h1>⚡ CYBERFORGE</h1>
-        <p>Security Investigation Workspace</p>
-    </header>
+<a class="skip-link" href="#main-content">Skip to content</a>
+<canvas id="emberCanvas" aria-hidden="true"></canvas>
+<div class="reticle" id="reticle" aria-hidden="true"><span class="reticle-ring"></span><span class="reticle-dot"></span></div>
 
-    <main>
+<nav class="topnav" aria-label="Primary">
+  <a class="brand" href="index.html">
+    <div class="mark"></div>
+    <div class="brand-text">
+      <h1>CYBERFORGE</h1>
+      <div class="tagline">Autonomous SOC Investigation Agent</div>
+    </div>
+  </a>
+  <div class="nav-links">
+    <a href="index.html" class="active">Dashboard</a>
+    <a href="#active">Active</a>
+    <a href="#resolved">Resolved</a>
+  </div>
+  <div class="nav-right">
+    <div class="status-pill"><span class="dot"></span>AGENT ONLINE</div>
+  </div>
+</nav>
 
-        <!-- Active Incidents -->
-        <section>
-            <h2>Active Incidents</h2>
+<main id="main-content">
 
-            <div class="incident-card">
-                <h3>INC-1024</h3>
-                <p>Suspicious SSH Activity</p>
-                <p>
-                    Risk:
-                    <strong class="risk-high">HIGH</strong>
-                </p>
+  <section class="stats-row" aria-label="Summary metrics" style="margin-bottom:0;padding-top:0;">
+    <div class="stat-card"><div class="stat-value accent">2</div><div class="stat-label">Open Incidents</div></div>
+    <div class="stat-card"><div class="stat-value">70</div><div class="stat-label">Avg. Risk Score</div></div>
+    <div class="stat-card"><div class="stat-value ok">3</div><div class="stat-label">Resolved This Week</div></div>
+    <div class="stat-card"><div class="stat-value ok">99.8%</div><div class="stat-label">Agent Uptime</div></div>
+  </section>
 
-                <button onclick="openIncident('INC-1024')">
-                    Open Incident
-                </button>
-            </div>
+  <section id="active" style="margin-top:56px;">
+    <div class="section-head"><h2>Active Incidents</h2><span class="count" id="active-count">2 open</span></div>
 
-            <div class="incident-card">
-                <h3>INC-1025</h3>
-                <p>Unusual Network Activity</p>
-                <p>
-                    Risk:
-                    <strong class="risk-medium">MEDIUM</strong>
-                </p>
+    <div class="toolbar">
+      <input type="text" class="search-input" id="search-input" placeholder="Search by incident ID or description…" aria-label="Search incidents">
+      <select class="sort-select" id="sort-select" aria-label="Sort incidents">
+        <option value="risk">Sort: Highest risk</option>
+        <option value="recent">Sort: Most recent</option>
+        <option value="id">Sort: Incident ID</option>
+      </select>
+    </div>
 
-                <button onclick="openIncident('INC-1025')">
-                    Open Incident
-                </button>
-            </div>
+    <div class="incident-grid" id="incident-grid" aria-live="polite">
 
-        </section>
+      <div class="tilt-card" data-id="INC-1024" data-desc="Suspicious SSH Activity" data-risk="high" data-risk-num="3" data-minutes="4">
+        <div class="eyebrow">Active Incident</div>
+        <div class="inc-id">INC-1024</div>
+        <p class="inc-desc">Suspicious SSH Activity</p>
+        <div class="row">
+          <span class="risk-badge risk-high">High Risk</span>
+          <span class="meta">detected 4m ago</span>
+        </div>
+        <button class="btn btn-open" onclick="openIncident('INC-1024')">
+          Open Incident <span aria-hidden="true">→</span>
+        </button>
+      </div>
 
+      <div class="tilt-card" data-id="INC-1025" data-desc="Unusual Network Activity" data-risk="medium" data-risk-num="2" data-minutes="21">
+        <div class="eyebrow">Active Incident</div>
+        <div class="inc-id">INC-1025</div>
+        <p class="inc-desc">Unusual Network Activity</p>
+        <div class="row">
+          <span class="risk-badge risk-medium">Medium Risk</span>
+          <span class="meta">detected 21m ago</span>
+        </div>
+        <button class="btn btn-open" onclick="openIncident('INC-1025')">
+          Open Incident <span aria-hidden="true">→</span>
+        </button>
+      </div>
 
-        <!-- Previously Investigated Incidents -->
-        <section>
-            <h2>Previously Investigated Incidents</h2>
+    </div>
+    <div class="empty-state" id="empty-state" style="display:none;">No incidents match your search.</div>
+  </section>
 
-            <ul>
+  <section id="resolved">
+    <div class="section-head"><h2>Previously Investigated</h2><span class="count">3 resolved</span></div>
+    <ul class="log-list">
+      <li>
+        <span class="id">INC-1001</span>
+        <span class="status-resolved">RESOLVED</span>
+        <button class="reopen-btn" onclick="openIncident('INC-1001')">Reopen</button>
+      </li>
+      <li>
+        <span class="id">INC-1002</span>
+        <span class="status-resolved">RESOLVED</span>
+        <button class="reopen-btn" onclick="openIncident('INC-1002')">Reopen</button>
+      </li>
+      <li>
+        <span class="id">INC-1003</span>
+        <span class="status-resolved">RESOLVED</span>
+        <button class="reopen-btn" onclick="openIncident('INC-1003')">Reopen</button>
+      </li>
+    </ul>
+  </section>
 
-                <li>
-                    INC-1001
+</main>
 
-                    <button onclick="openIncident('INC-1001')">
-                        Reopen
-                    </button>
-                </li>
+<footer>CYBERFORGE · Built for The Agent Harness Hackathon · Human approval required before any response action</footer>
 
-                <li>
-                    INC-1002
+<div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
 
-                    <button onclick="openIncident('INC-1002')">
-                        Reopen
-                    </button>
-                </li>
+<script>
+  function openIncident(incidentId){
+    window.location.href = `incident.html?id=${incidentId}`;
+  }
 
-                <li>
-                    INC-1003
+  // ---- toasts ----
+  function toast(message, type='info'){
+    const stack = document.getElementById('toast-stack');
+    const el = document.createElement('div');
+    el.className = `toast ${type}`;
+    el.textContent = message;
+    stack.appendChild(el);
+    setTimeout(() => el.remove(), 3500);
+  }
 
-                    <button onclick="openIncident('INC-1003')">
-                        Reopen
-                    </button>
-                </li>
+  // ---- search + sort ----
+  const searchInput = document.getElementById('search-input');
+  const sortSelect = document.getElementById('sort-select');
+  const grid = document.getElementById('incident-grid');
+  const emptyState = document.getElementById('empty-state');
+  const activeCount = document.getElementById('active-count');
+  const cards = Array.from(grid.querySelectorAll('.tilt-card'));
 
-            </ul>
-        </section>
+  function riskWeight(r){ return { high:3, medium:2, low:1 }[r] || 0; }
 
-    </main>
+  function refreshList(){
+    const q = searchInput.value.trim().toLowerCase();
+    const sort = sortSelect.value;
 
+    let visible = cards.filter(c => {
+      const hay = `${c.dataset.id} ${c.dataset.desc}`.toLowerCase();
+      const match = hay.includes(q);
+      c.style.display = match ? '' : 'none';
+      return match;
+    });
 
-    <script>
-        function openIncident(incidentId) {
-            window.location.href =
-                `incident.html?id=${incidentId}`;
-        }
-    </script>
+    const sorted = [...visible].sort((a,b) => {
+      if (sort === 'risk') return riskWeight(b.dataset.risk) - riskWeight(a.dataset.risk);
+      if (sort === 'recent') return Number(a.dataset.minutes) - Number(b.dataset.minutes);
+      if (sort === 'id') return a.dataset.id.localeCompare(b.dataset.id);
+      return 0;
+    });
+    sorted.forEach(c => grid.appendChild(c));
+
+    emptyState.style.display = visible.length === 0 ? 'block' : 'none';
+    activeCount.textContent = `${visible.length} open`;
+  }
+  searchInput.addEventListener('input', refreshList);
+  sortSelect.addEventListener('change', refreshList);
+
+  // ---- custom reticle cursor ----
+  const reticle = document.getElementById('reticle');
+  const isCoarse = window.matchMedia('(pointer: coarse)').matches;
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!isCoarse) {
+    let mx=0,my=0,cx=0,cy=0;
+    window.addEventListener('mousemove', e=>{ mx=e.clientX; my=e.clientY; });
+    function loop(){ cx += (mx-cx)*0.22; cy += (my-cy)*0.22; reticle.style.transform = `translate(${cx}px,${cy}px)`; requestAnimationFrame(loop); }
+    loop();
+    document.querySelectorAll('button, a, .tilt-card, input, select').forEach(el=>{
+      el.addEventListener('mouseenter', ()=>{
+        reticle.classList.add('active');
+        if (el.querySelector && el.querySelector('.risk-high')) reticle.classList.add('risk');
+      });
+      el.addEventListener('mouseleave', ()=> reticle.classList.remove('active','risk'));
+    });
+  }
+
+  // ---- 3D tilt on cards ----
+  if (!isCoarse && !reduceMotion) {
+    cards.forEach(card => {
+      card.addEventListener('mousemove', e=>{
+        const r = card.getBoundingClientRect();
+        const x = e.clientX - r.left, y = e.clientY - r.top;
+        const rx = ((y / r.height) - 0.5) * -8;
+        const ry = ((x / r.width) - 0.5) * 8;
+        card.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
+      });
+      card.addEventListener('mouseleave', ()=>{
+        card.style.transform = 'perspective(900px) rotateX(0) rotateY(0) translateZ(0)';
+      });
+    });
+  }
+
+  // ---- ambient ember particles ----
+  const canvas = document.getElementById('emberCanvas');
+  const ctx = canvas.getContext('2d');
+  let w,h,embers=[];
+  function resize(){ w=canvas.width=window.innerWidth; h=canvas.height=window.innerHeight; }
+  resize(); window.addEventListener('resize', resize);
+  function makeEmber(){ return { x:Math.random()*w, y:h+20, r:Math.random()*1.6+0.4, sp:Math.random()*0.5+0.15, drift:(Math.random()-0.5)*0.4, a:Math.random()*0.5+0.2 }; }
+  const count = reduceMotion ? 0 : 46;
+  for (let i=0;i<count;i++) embers.push(makeEmber());
+  function draw(){
+    ctx.clearRect(0,0,w,h);
+    embers.forEach(p=>{
+      p.y -= p.sp; p.x += p.drift;
+      if (p.y < -20) { Object.assign(p, makeEmber()); p.y = h+10; }
+      ctx.beginPath();
+      ctx.fillStyle = `rgba(255,138,61,${p.a})`;
+      ctx.shadowColor = 'rgba(255,138,61,0.8)';
+      ctx.shadowBlur = 4;
+      ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+      ctx.fill();
+    });
+    if (count>0) requestAnimationFrame(draw);
+  }
+  draw();
+
+  // welcome toast
+  window.addEventListener('load', () => toast('2 active incidents awaiting investigation', 'info'));
+</script>
 
 </body>
 </html>
