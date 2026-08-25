@@ -1,199 +1,382 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="style.css">
-    <title>CyberForge — Incident Investigation</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CyberForge — Incident Investigation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 
-    <header>
-        <h1>⚡ CYBERFORGE</h1>
-        <p>Security Investigation Workspace</p>
-    </header>
+<a class="skip-link" href="#main-content">Skip to content</a>
+<canvas id="emberCanvas" aria-hidden="true"></canvas>
+<div class="reticle" id="reticle" aria-hidden="true"><span class="reticle-ring"></span><span class="reticle-dot"></span></div>
 
+<nav class="topnav" aria-label="Primary">
+  <a class="brand" href="index.html">
+    <div class="mark"></div>
+    <div class="brand-text">
+      <h1>CYBERFORGE</h1>
+      <div class="tagline">Autonomous SOC Investigation Agent</div>
+    </div>
+  </a>
+  <div class="nav-links">
+    <a href="index.html">Dashboard</a>
+    <a href="incident.html" class="active">Investigation</a>
+  </div>
+  <div class="nav-right">
+    <div class="status-pill"><span class="dot"></span>AGENT ONLINE</div>
+  </div>
+</nav>
 
-    <main>
+<div class="breadcrumb"><a href="index.html">Dashboard</a> / <span id="breadcrumb-id">INC-1024</span></div>
 
-        <!-- Incident Header -->
-        <section>
-            <h2>Incident Investigation</h2>
+<div class="title-row">
+  <span class="inc-id-big" id="incident-id">INC-1024</span>
+  <span class="risk-badge risk-high" id="header-risk-badge">Unassessed</span>
+</div>
+<p class="inc-sub" id="incident-desc">Suspicious SSH Activity · flagged by perimeter log monitor</p>
 
-            <p>
-                Incident ID:
-                <strong id="incident-id">INC-1024</strong>
-            </p>
+<div class="incident-stats-grid">
+  <div class="stat-block"><div class="stat-label">Source IP</div><div class="stat-block-value" id="stat-source">—</div></div>
+  <div class="stat-block"><div class="stat-label">Affected Host</div><div class="stat-block-value" id="stat-host">—</div></div>
+  <div class="stat-block"><div class="stat-label">First Seen</div><div class="stat-block-value" id="stat-seen">—</div></div>
+  <div class="stat-block"><div class="stat-label">Subagents Engaged</div><div class="stat-block-value" id="stat-subagents">2</div></div>
+</div>
 
-            <button id="investigate-button">
-                Investigate Incident
-            </button>
-        </section>
+<main class="incident-main" id="main-content">
 
+  <div class="col-main">
 
-        <hr>
+    <div class="plate">
+      <div class="plate-head"><h2>Investigation</h2><span class="plate-hint">Press <span class="kbd">I</span> to run</span></div>
+      <p style="font-family:var(--font-mono);font-size:12.5px;color:var(--ink-dim);margin:0 0 18px;">
+        Dispatch the root agent to correlate evidence across subagents before any response action is proposed.
+      </p>
+      <button id="investigate-button" class="investigate-btn">Investigate Incident</button>
+    </div>
 
+    <div class="plate">
+      <h2>Evidence</h2>
+      <div id="evidence-panel" aria-live="polite">
+        <p class="evidence-placeholder">Evidence collected by the investigation agent will appear here.</p>
+      </div>
+    </div>
 
-        <!-- Evidence Panel -->
-        <section>
-            <h2>Evidence</h2>
+    <div class="plate">
+      <h2>Agent Activity Timeline</h2>
+      <ul class="timeline" id="timeline" aria-live="polite">
+        <li id="step-wait"><div class="t-title t-waiting">Waiting…</div><div class="t-desc">Agent investigation events will appear here.</div></li>
+      </ul>
+    </div>
 
-            <div id="evidence-panel">
-                <p>
-                    Evidence collected by the investigation
-                    agent will appear here.
-                </p>
-            </div>
-        </section>
+  </div>
 
+  <div class="col-side">
 
-        <hr>
+    <div class="plate">
+      <h2>Risk Score</h2>
+      <div class="gauge-wrap" id="risk-score">
+        <svg width="180" height="180" viewBox="0 0 180 180" role="img" aria-label="Risk score gauge">
+          <circle cx="90" cy="90" r="78" fill="none" stroke="var(--steel-line)" stroke-width="10"/>
+          <circle id="gauge-arc" cx="90" cy="90" r="78" fill="none" stroke="var(--ember)" stroke-width="10"
+                  stroke-linecap="round" stroke-dasharray="490" stroke-dashoffset="490"
+                  transform="rotate(-90 90 90)" style="transition:stroke-dashoffset 1.1s cubic-bezier(.3,.8,.3,1), stroke .4s ease;"/>
+        </svg>
+        <div class="gauge-value" id="gauge-value">--</div>
+        <div class="gauge-label">RISK / 100</div>
+      </div>
+      <p class="risk-note" id="risk-note">Run an investigation to compute a risk score.</p>
 
+      <ul class="explain-list" id="explain-list"></ul>
+    </div>
 
-        <!-- Risk Score -->
-        <section>
-            <h2>Risk Score</h2>
+    <div class="plate">
+      <h2>Response</h2>
+      <p class="response-copy">Potential response actions require human approval before execution. No action is taken automatically.</p>
+      <div class="response-actions">
+        <button id="approve-button" class="btn-approve" disabled>Approve</button>
+        <button id="reject-button" class="btn-reject" disabled>Reject</button>
+      </div>
+      <div class="decision-result" id="decision-result" aria-live="polite"></div>
+      <button id="copy-button" class="copy-btn" disabled>Copy audit summary</button>
+    </div>
 
-            <div id="risk-score">
-                <p>
-                    Risk score will appear after investigation.
-                </p>
-            </div>
-        </section>
+    <div class="plate">
+      <h2>Previously Investigated</h2>
+      <ul class="log-list">
+        <li><span>INC-1001</span><span class="status-resolved">RESOLVED</span><button class="reopen-btn" onclick="openIncident('INC-1001')">Reopen</button></li>
+        <li><span>INC-1002</span><span class="status-resolved">RESOLVED</span><button class="reopen-btn" onclick="openIncident('INC-1002')">Reopen</button></li>
+        <li><span>INC-1003</span><span class="status-resolved">RESOLVED</span><button class="reopen-btn" onclick="openIncident('INC-1003')">Reopen</button></li>
+      </ul>
+    </div>
 
+  </div>
 
-        <hr>
+</main>
 
+<div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
 
-        <!-- Agent Timeline -->
-        <section>
-            <h2>Agent Activity Timeline</h2>
+<script>
+  // ---- read incident id from URL ----
+  const params = new URLSearchParams(window.location.search);
+  const incidentId = params.get('id') || 'INC-1024';
+  document.getElementById('incident-id').textContent = incidentId;
+  document.getElementById('breadcrumb-id').textContent = incidentId;
 
-            <div id="timeline">
+  function openIncident(id){ window.location.href = `incident.html?id=${id}`; }
 
-                <p>
-                    <strong>Waiting...</strong>
-                </p>
+  // ---- toasts ----
+  function toast(message, type='info'){
+    const stack = document.getElementById('toast-stack');
+    const el = document.createElement('div');
+    el.className = `toast ${type}`;
+    el.textContent = message;
+    stack.appendChild(el);
+    setTimeout(() => el.remove(), 3500);
+  }
 
-                <p>
-                    Agent investigation events will appear here.
-                </p>
+  // ---- mock scenario data (placeholder until backend wiring lands) ----
+  const scenarios = {
+    'INC-1024': {
+      desc:'Suspicious SSH Activity · flagged by perimeter log monitor',
+      risk:'high', score:87, source:'203.0.113.44', host:'PROD-WEB-02', seen:'04m ago',
+      evidence:[
+        { tag:'[AUTH]', level:'crit', text:'14 failed SSH logins for user "admin" from 203.0.113.44 in 60s' },
+        { tag:'[AUTH]', level:'crit', text:'Successful login from 203.0.113.44 immediately following failures' },
+        { tag:'[SYS]',  level:'warn', text:'New sudoers entry created 40s after login' },
+        { tag:'[NET]',  level:'warn', text:'Outbound connection opened to unrecognised IP on port 4444' },
+      ],
+      explain:[
+        { label:'Brute-force pattern match', weight:92, level:'high' },
+        { label:'Privilege escalation signal', weight:78, level:'high' },
+        { label:'Anomalous outbound connection', weight:64, level:'' },
+        { label:'Host baseline deviation', weight:31, level:'low' },
+      ],
+      note:'Pattern consistent with brute-force compromise followed by privilege escalation. Recommend blocking source IP.'
+    },
+    'INC-1025': {
+      desc:'Unusual Network Activity · flagged by traffic baseline monitor',
+      risk:'medium', score:54, source:'10.0.4.19', host:'WKS-114', seen:'21m ago',
+      evidence:[
+        { tag:'[NET]', level:'warn', text:'Sustained 3x baseline outbound traffic from host WKS-114' },
+        { tag:'[NET]', level:'', text:'Destination is a known CDN edge node' },
+        { tag:'[SYS]', level:'', text:'No new processes or auth anomalies on host in same window' },
+      ],
+      explain:[
+        { label:'Traffic volume deviation', weight:58, level:'' },
+        { label:'Destination reputation', weight:12, level:'low' },
+        { label:'Host process anomalies', weight:8, level:'low' },
+      ],
+      note:'Traffic volume is elevated but destination and host state look benign. Recommend monitoring before action.'
+    }
+  };
+  const scenario = scenarios[incidentId] || scenarios['INC-1024'];
+  document.getElementById('incident-desc').textContent = scenario.desc;
+  document.getElementById('stat-source').textContent = scenario.source;
+  document.getElementById('stat-host').textContent = scenario.host;
+  document.getElementById('stat-seen').textContent = scenario.seen;
 
-            </div>
-        </section>
+  const riskBadge = document.getElementById('header-risk-badge');
+  const riskClass = { high:'risk-high', medium:'risk-medium', low:'risk-low' }[scenario.risk];
+  const riskLabel = { high:'High Risk', medium:'Medium Risk', low:'Low Risk' }[scenario.risk];
 
+  const investigateBtn = document.getElementById('investigate-button');
+  const evidencePanel = document.getElementById('evidence-panel');
+  const timeline = document.getElementById('timeline');
+  const gaugeArc = document.getElementById('gauge-arc');
+  const gaugeValue = document.getElementById('gauge-value');
+  const riskNote = document.getElementById('risk-note');
+  const explainList = document.getElementById('explain-list');
+  const approveBtn = document.getElementById('approve-button');
+  const rejectBtn = document.getElementById('reject-button');
+  const copyBtn = document.getElementById('copy-button');
+  const decisionResult = document.getElementById('decision-result');
 
-        <hr>
+  const CIRC = 490;
+  let decision = null;
 
+  const steps = [
+    { id:'root', title:'Root Agent', desc:'Incident triaged, dispatching subagents' },
+    { id:'log',  title:'Log-Analysis Subagent', desc:'Correlating authentication and system logs' },
+    { id:'net',  title:'Network Subagent', desc:'Reviewing connection and traffic history' },
+    { id:'risk', title:'Risk Engine', desc:'Scoring severity from merged findings' },
+    { id:'gate', title:'Human Approval Gate', desc:'Awaiting analyst decision before any action' },
+  ];
 
-        <!-- Response / Approval -->
-        <section>
-            <h2>Response</h2>
+  function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
-            <p>
-                Potential response actions require human approval.
-            </p>
+  async function runInvestigation(){
+    if (investigateBtn.disabled) return;
+    investigateBtn.disabled = true;
+    investigateBtn.textContent = 'Investigating…';
+    toast(`Investigation started for ${incidentId}`, 'info');
 
-            <button id="approve-button">
-                APPROVE
-            </button>
+    evidencePanel.innerHTML = '<div class="skeleton-line"></div><div class="skeleton-line short"></div>';
+    timeline.innerHTML = '';
+    explainList.innerHTML = '';
+    decisionResult.className = 'decision-result';
+    decisionResult.textContent = '';
+    approveBtn.disabled = true; rejectBtn.disabled = true; copyBtn.disabled = true;
 
-            <button id="reject-button">
-                REJECT
-            </button>
-        </section>
+    steps.forEach(s => {
+      const li = document.createElement('li');
+      li.id = `step-${s.id}`;
+      li.innerHTML = `<div class="t-title">${s.title}</div><div class="t-desc">${s.desc}</div>`;
+      timeline.appendChild(li);
+    });
 
+    const evidenceQueue = [...scenario.evidence];
+    let firstLine = true;
 
-        <hr>
-
-
-        <!-- Previously Investigated -->
-        <section>
-            <h2>Previously Investigated Incidents</h2>
-
-            <ul>
-
-                <li>
-                    INC-1001
-                    <button onclick="openIncident('INC-1001')">
-                        Reopen
-                    </button>
-                </li>
-
-                <li>
-                    INC-1002
-                    <button onclick="openIncident('INC-1002')">
-                        Reopen
-                    </button>
-                </li>
-
-                <li>
-                    INC-1003
-                    <button onclick="openIncident('INC-1003')">
-                        Reopen
-                    </button>
-                </li>
-
-            </ul>
-        </section>
-
-    </main>
-
-
-    <script>
-
-        // Get incident ID from URL
-        const params = new URLSearchParams(window.location.search);
-
-        const incidentId =
-            params.get("id") || "INC-1024";
-
-        document.getElementById("incident-id").textContent =
-            incidentId;
-
-
-        // Temporary placeholder actions
-        document
-            .getElementById("investigate-button")
-            .addEventListener("click", function () {
-
-                alert(
-                    `Investigation started for ${incidentId}`
-                );
-
-            });
-
-
-        document
-            .getElementById("approve-button")
-            .addEventListener("click", function () {
-
-                alert(
-                    "Approval requested. Backend integration coming next."
-                );
-
-            });
-
-
-        document
-            .getElementById("reject-button")
-            .addEventListener("click", function () {
-
-                alert(
-                    "Response rejected."
-                );
-
-            });
-
-
-        function openIncident(id) {
-
-            window.location.href =
-                `incident.html?id=${id}`;
-
+    for (let i = 0; i < steps.length - 1; i++) {
+      const li = document.getElementById(`step-${steps[i].id}`);
+      li.classList.add('active');
+      await sleep(500);
+      li.classList.remove('active');
+      li.classList.add('done');
+      if (steps[i].id === 'log' || steps[i].id === 'net') {
+        const line = evidenceQueue.shift();
+        if (line) {
+          if (firstLine) { evidencePanel.innerHTML = ''; firstLine = false; }
+          appendEvidence(line);
         }
+      }
+    }
+    if (firstLine) evidencePanel.innerHTML = '';
+    evidenceQueue.forEach(appendEvidence);
 
-    </script>
+    riskBadge.textContent = riskLabel;
+    riskBadge.className = `risk-badge ${riskClass}`;
+    gaugeArc.style.stroke = scenario.risk === 'high' ? 'var(--ember-red)' : scenario.risk === 'medium' ? 'var(--ember)' : 'var(--spark)';
+    const offset = CIRC - (CIRC * scenario.score / 100);
+    requestAnimationFrame(() => { gaugeArc.style.strokeDashoffset = offset; });
+    gaugeValue.textContent = scenario.score;
+    riskNote.textContent = scenario.note;
+
+    scenario.explain.forEach((f, idx) => {
+      const li = document.createElement('li');
+      li.className = 'explain-item';
+      li.innerHTML = `
+        <div class="explain-item-head"><span>${f.label}</span><span>${f.weight}%</span></div>
+        <div class="explain-bar-track"><div class="explain-bar-fill ${f.level}" id="ebar-${idx}"></div></div>`;
+      explainList.appendChild(li);
+      requestAnimationFrame(() => {
+        setTimeout(() => { document.getElementById(`ebar-${idx}`).style.width = f.weight + '%'; }, 60 * idx);
+      });
+    });
+
+    document.getElementById('step-gate').classList.add('active');
+
+    investigateBtn.textContent = 'Investigation Complete';
+    approveBtn.disabled = false;
+    rejectBtn.disabled = false;
+    toast('Investigation complete — awaiting your decision', 'success');
+  }
+
+  function appendEvidence(line){
+    const div = document.createElement('div');
+    div.className = 'log-line';
+    div.innerHTML = `<span class="tag ${line.level}">${line.tag}</span><span>${line.text}</span>`;
+    evidencePanel.appendChild(div);
+  }
+
+  investigateBtn.addEventListener('click', runInvestigation);
+
+  approveBtn.addEventListener('click', () => {
+    document.getElementById('step-gate').classList.remove('active');
+    document.getElementById('step-gate').classList.add('done');
+    decisionResult.className = 'decision-result approved';
+    decisionResult.textContent = `Approved · response action logged for ${incidentId} · source blocked pending execution`;
+    approveBtn.disabled = true; rejectBtn.disabled = true; copyBtn.disabled = false;
+    decision = 'approved';
+    toast('Response approved and logged to audit trail', 'success');
+  });
+
+  rejectBtn.addEventListener('click', () => {
+    document.getElementById('step-gate').classList.remove('active');
+    document.getElementById('step-gate').classList.add('done');
+    decisionResult.className = 'decision-result rejected';
+    decisionResult.textContent = `Rejected · no action taken for ${incidentId} · decision logged to audit trail`;
+    approveBtn.disabled = true; rejectBtn.disabled = true; copyBtn.disabled = false;
+    decision = 'rejected';
+    toast('Decision logged — no action taken', 'info');
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    const summary = {
+      incident: incidentId,
+      risk_score: scenario.score,
+      risk_level: scenario.risk,
+      source_ip: scenario.source,
+      affected_host: scenario.host,
+      decision: decision,
+      timestamp: new Date().toISOString()
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(summary, null, 2));
+      toast('Audit summary copied to clipboard', 'success');
+    } catch {
+      toast('Could not access clipboard', 'error');
+    }
+  });
+
+  // ---- keyboard shortcut: "I" to investigate ----
+  window.addEventListener('keydown', (e) => {
+    if ((e.key === 'i' || e.key === 'I') && !investigateBtn.disabled && document.activeElement.tagName !== 'INPUT') {
+      runInvestigation();
+    }
+  });
+
+  // ---- custom reticle cursor ----
+  const reticle = document.getElementById('reticle');
+  const isCoarse = window.matchMedia('(pointer: coarse)').matches;
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!isCoarse) {
+    let mx=0,my=0,cx=0,cy=0;
+    window.addEventListener('mousemove', e=>{ mx=e.clientX; my=e.clientY; });
+    function loop(){ cx += (mx-cx)*0.22; cy += (my-cy)*0.22; reticle.style.transform = `translate(${cx}px,${cy}px)`; requestAnimationFrame(loop); }
+    loop();
+    function bindReticle(){
+      document.querySelectorAll('button, a, .plate').forEach(el=>{
+        el.addEventListener('mouseenter', ()=>{
+          reticle.classList.add('active');
+          if (el.id === 'reject-button') reticle.classList.add('risk');
+          if (el.id === 'approve-button') reticle.classList.add('ok');
+        });
+        el.addEventListener('mouseleave', ()=> reticle.classList.remove('active','risk','ok'));
+      });
+    }
+    bindReticle();
+  }
+
+  // ---- ambient ember particles ----
+  const canvas = document.getElementById('emberCanvas');
+  const ctx = canvas.getContext('2d');
+  let w,h,embers=[];
+  function resize(){ w=canvas.width=window.innerWidth; h=canvas.height=window.innerHeight; }
+  resize(); window.addEventListener('resize', resize);
+  function makeEmber(){ return { x:Math.random()*w, y:h+20, r:Math.random()*1.6+0.4, sp:Math.random()*0.5+0.15, drift:(Math.random()-0.5)*0.4, a:Math.random()*0.5+0.2 }; }
+  const count = reduceMotion ? 0 : 46;
+  for (let i=0;i<count;i++) embers.push(makeEmber());
+  function draw(){
+    ctx.clearRect(0,0,w,h);
+    embers.forEach(p=>{
+      p.y -= p.sp; p.x += p.drift;
+      if (p.y < -20) { Object.assign(p, makeEmber()); p.y = h+10; }
+      ctx.beginPath();
+      ctx.fillStyle = `rgba(255,138,61,${p.a})`;
+      ctx.shadowColor = 'rgba(255,138,61,0.8)';
+      ctx.shadowBlur = 4;
+      ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+      ctx.fill();
+    });
+    if (count>0) requestAnimationFrame(draw);
+  }
+  draw();
+</script>
 
 </body>
 </html>
