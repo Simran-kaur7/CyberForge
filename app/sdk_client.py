@@ -10,6 +10,10 @@ TOOL_TIMEOUT_SECONDS = 15
 MAX_ERROR_OUTPUT = 500
 
 
+class ToolTimeoutError(RuntimeError):
+    """Raised when an investigation tool exceeds its execution timeout."""
+
+
 def run_tool(script_name: str, *args: str) -> dict:
     script_path = TOOLS_DIR / script_name
 
@@ -39,7 +43,7 @@ def run_tool(script_name: str, *args: str) -> dict:
 
         context = "; ".join(details)
 
-        raise RuntimeError(
+        raise ToolTimeoutError(
             f"{script_name} timed out after "
             f"{TOOL_TIMEOUT_SECONDS} seconds"
             + (f" ({context})" if context else "")

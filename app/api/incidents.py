@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from app.sdk_client import (
+    ToolTimeoutError,
     analyze_evidence,
     check_system_activity,
     search_security_logs,
@@ -34,15 +35,13 @@ def investigate_incident(incident_id: str):
     except HTTPException:
         raise
 
+    except ToolTimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="Security investigation tool timed out.",
+        ) from exc
+
     except RuntimeError as exc:
-        message = str(exc)
-
-        if "timed out after" in message:
-            raise HTTPException(
-                status_code=504,
-                detail="Security investigation tool timed out.",
-            ) from exc
-
         raise HTTPException(
             status_code=502,
             detail="Security investigation tool failed.",
