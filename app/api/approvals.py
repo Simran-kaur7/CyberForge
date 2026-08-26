@@ -172,16 +172,17 @@ def request_containment_approval(
             except RuntimeError:
                 pass  # TrueForge unavailable        # Atomically persist tool_call_id, scoped to the action_id we just created
         late_forward = None
+        late_forward_failed = False
         if tool_call_id:
             cas_result = set_approval_tool_call_id(
                 local_session_id, result["action_id"], tool_call_id
             )
-            # If the approval was already decided before tool_call_id arrived,
-            # we must forward that decision to TrueForge now
             if cas_result.get("pending_decision"):
                 late_forward = cas_result
+            elif cas_result.get("already_forwarded"):
+                pass  # Another handler already forwarded
 
-        # Forward a late-arriving decision to TrueForge
+        # Forward a late-arriving decision to TrueForge (claiming ownership)
         if late_forward and tf_session_id and tool_call_id:
             decision = late_forward["pending_decision"]
             decided_by = late_forward.get("decided_by", "analyst")
@@ -202,7 +203,7 @@ def request_containment_approval(
                                                   "reason": f"Rejected by {decided_by}"}}]},
                     )
             except RuntimeError:
-                pass
+                late_forward_failed = True
 
         return {
             "success": True, "action_id": result["action_id"],
@@ -211,6 +212,7 @@ def request_containment_approval(
             "tool_call_id": tool_call_id,
             "analyst": analyst,
             "trueforge_event": tf_event,
+            "late_forward_failed": late_forward_failed,
         }
     except HTTPException:
         raise
@@ -247,20 +249,30 @@ def approve_containment(
                 tf_tool_call_id = session["approval_state"].get("tool_call_id")
 
         if tf_session_id and tf_tool_call_id:
-            try:
-                approval_input = {
-                    "type": "user.tool_approval",
-                    "tool_call_id": tf_tool_call_id,
-                    "approval": {"status": "allow"},
-                }
-                if body.thread_id:
-                    approval_input["thread_id"] = body.thread_id
-                tf_event = _tf_post_sse(
-                    f"/api/v1/sessions/{tf_session_id}/turns",
-                    {"input": [approval_input]},
-                )
-            except RuntimeError:
-                pass
+            # Check if the late-forward handler already forwarded this action
+            session = get_session(body.session_id)
+            already_forwarded = False
+            if session:
+                for a in session.get("actions", []):
+                    if a.get("action_id") == body.action_id and a.get("forwarded_to_trueforge"):
+                        already_forwarded = True
+                        break
+
+            if not already_forwarded:
+                try:
+                    approval_input = {
+                        "type": "user.tool_approval",
+                        "tool_call_id": tf_tool_call_id,
+                        "approval": {"status": "allow"},
+                    }
+                    if body.thread_id:
+                        approval_input["thread_id"] = body.thread_id
+                    tf_event = _tf_post_sse(
+                        f"/api/v1/sessions/{tf_session_id}/turns",
+                        {"input": [approval_input]},
+                    )
+                except RuntimeError:
+                    pass
 
         return {
             "success": True, "action_id": body.action_id,
@@ -302,21 +314,31 @@ def reject_containment(
                 tf_tool_call_id = session["approval_state"].get("tool_call_id")
 
         if tf_session_id and tf_tool_call_id:
-            try:
-                reason = body.reason or f"Rejected by {analyst}"
-                approval_input = {
-                    "type": "user.tool_approval",
-                    "tool_call_id": tf_tool_call_id,
-                    "approval": {"status": "deny", "reason": reason},
-                }
-                if body.thread_id:
-                    approval_input["thread_id"] = body.thread_id
-                tf_event = _tf_post_sse(
-                    f"/api/v1/sessions/{tf_session_id}/turns",
-                    {"input": [approval_input]},
-                )
-            except RuntimeError:
-                pass
+            # Check if the late-forward handler already forwarded this action
+            session = get_session(body.session_id)
+            already_forwarded = False
+            if session:
+                for a in session.get("actions", []):
+                    if a.get("action_id") == body.action_id and a.get("forwarded_to_trueforge"):
+                        already_forwarded = True
+                        break
+
+            if not already_forwarded:
+                try:
+                    reason = body.reason or f"Rejected by {analyst}"
+                    approval_input = {
+                        "type": "user.tool_approval",
+                        "tool_call_id": tf_tool_call_id,
+                        "approval": {"status": "deny", "reason": reason},
+                    }
+                    if body.thread_id:
+                        approval_input["thread_id"] = body.thread_id
+                    tf_event = _tf_post_sse(
+                        f"/api/v1/sessions/{tf_session_id}/turns",
+                        {"input": [approval_input]},
+                    )
+                except RuntimeError:
+                    pass
 
         return {
             "success": True, "action_id": body.action_id,

@@ -276,35 +276,55 @@ def update_session(sid: str, **kw) -> dict:
 
 
 def set_approval_tool_call_id(sid: str, action_id: str, tool_call_id: str) -> dict:
-    """Atomically set tool_call_id on the current approval_state.
+    """Atomically set tool_call_id and claim forwarding ownership.
 
-    Only writes if the current approval still belongs to the given
-    action_id — prevents a stale TrueForge response from overwriting
-    a newer approval's tool_call_id.
+    Resolution order:
+    1. If the current approval_state matches action_id, write there.
+    2. Otherwise search the actions[] history for a terminal match.
+    3. If the action is terminal, return pending_decision so the
+       caller can forward to TrueForge.
 
-    If the approval is already terminal (approved/rejected) when this
-    write arrives, returns ``pending_decision`` so the caller can
-    forward the late-arriving decision to TrueForge.
+    Sets forwarded_to_trueforge=False on the matching action to
+    claim forwarding ownership — only one handler will forward.
     """
     def _set(sessions):
         for s in sessions:
             if s["id"] != sid:
                 continue
+
             ap = s.get("approval_state")
-            if not ap:
-                return {"success": False, "error": "No approval state"}
-            if ap.get("action_id") != action_id:
-                return {"success": False, "error": "Approval already replaced by a newer request"}
-            ap["tool_call_id"] = tool_call_id
+            target = None  # the approval dict to write tool_call_id into
+
+            # Case 1: current approval matches
+            if ap and ap.get("action_id") == action_id:
+                target = ap
+
+            # Case 2: look in actions[] history
+            if target is None:
+                for a in s.get("actions", []):
+                    if a.get("action_id") == action_id:
+                        target = a
+                        break
+
+            if target is None:
+                return {"success": False, "error": "Action not found"}
+
+            target["tool_call_id"] = tool_call_id
             s["updated_at"] = datetime.now(timezone.utc).isoformat()
-            # If already decided, the caller must forward to TrueForge
-            current_status = ap.get("status")
+
+            current_status = target.get("status")
             if current_status in ("approved", "rejected"):
-                return {
-                    "success": True, "action_id": action_id,
-                    "pending_decision": current_status,
-                    "decided_by": ap.get("decided_by"),
-                }
+                # Claim forwarding ownership — only first caller wins
+                if not target.get("forwarded_to_trueforge"):
+                    target["forwarded_to_trueforge"] = True
+                    return {
+                        "success": True, "action_id": action_id,
+                        "pending_decision": current_status,
+                        "decided_by": target.get("decided_by"),
+                    }
+                # Already forwarded by another handler
+                return {"success": True, "action_id": action_id, "already_forwarded": True}
+
             return {"success": True, "action_id": action_id}
         return {"success": False, "error": "Session not found"}
     return _mutate_sessions(_set)
