@@ -1,7 +1,9 @@
 """
 CyberForge Approval API — TrueForge native approval gate.
 
-Forwards approve/reject to TrueForge's HTTP API.
+Approvals are native TrueForge turn events. This API:
+1. Starts an agent turn that triggers the block_ip approval gate
+2. Forwards allow/deny decisions to resume the paused tool call
 Requires CYBERFORGE_API_KEY for containment decisions.
 """
 
@@ -17,21 +19,23 @@ router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 
 TRUEFORGE_URL = os.environ.get("TRUEFORGE_URL", "http://localhost:8790")
 EXPECTED_API_KEY = os.environ.get("CYBERFORGE_API_KEY", "")
+AGENT_NAME = os.environ.get("CYBERFORGE_AGENT_NAME", "cyberforge-investigator")
 
 
 class ApprovalRequest(BaseModel):
     session_id: str
-    action_type: str
-    action_detail: dict
+    message: str = "Investigate and contain the incident"
+    thread_id: Optional[str] = None
 
 
 class DecisionRequest(BaseModel):
     session_id: str
     action_id: str
+    thread_id: Optional[str] = None
+    reason: Optional[str] = None
 
 
 def _require_api_key(authorization: Optional[str] = Header(None)) -> str:
-    """Validate API key. Returns the analyst identity."""
     if not EXPECTED_API_KEY:
         return "analyst"
     if not authorization:
@@ -43,7 +47,6 @@ def _require_api_key(authorization: Optional[str] = Header(None)) -> str:
 
 
 def _tf_post(path: str, body: dict) -> dict:
-    """POST to TrueForge. Normalizes all errors to RuntimeError."""
     url = f"{TRUEFORGE_URL}{path}"
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
@@ -66,7 +69,6 @@ def _tf_post(path: str, body: dict) -> dict:
 
 
 def _tf_get(path: str) -> dict:
-    """GET from TrueForge. Normalizes all errors to RuntimeError."""
     url = f"{TRUEFORGE_URL}{path}"
     req = urllib.request.Request(url, method="GET")
     try:
@@ -89,8 +91,9 @@ def request_containment_approval(
     authorization: Optional[str] = Header(None),
 ):
     """
-    Request approval via TrueForge. Creates a turn that pauses
-    on the tool requiring approval, returning the pending state.
+    Start an agent turn that will trigger the block_ip approval gate.
+    TrueForge pauses on block_ip (require_approval_for_tools) and
+    emits a tool.approval_required event with the tool_call_id.
     """
     analyst = _require_api_key(authorization)
     try:
@@ -98,16 +101,14 @@ def request_containment_approval(
             f"/api/v1/sessions/{body.session_id}/turns",
             {
                 "input": [{
-                    "type": "tool_approval_request",
-                    "action_type": body.action_type,
-                    "action_detail": body.action_detail,
+                    "type": "user.message",
+                    "content": body.message,
                 }]
             },
         )
         return {
-            "success": True, "status": "pending",
+            "success": True,
             "session_id": body.session_id,
-            "action_type": body.action_type,
             "analyst": analyst,
             "trueforge_response": result,
         }
@@ -120,12 +121,22 @@ def approve_containment(
     body: DecisionRequest,
     authorization: Optional[str] = Header(None),
 ):
-    """Approve via TrueForge. Sends allow decision."""
+    """
+    Approve a pending tool call via TrueForge.
+    Uses type: user.tool_approval with thread_id and nested approval object.
+    """
     analyst = _require_api_key(authorization)
+    approval_input = {
+        "type": "user.tool_approval",
+        "tool_call_id": body.action_id,
+        "approval": {"status": "allow"},
+    }
+    if body.thread_id:
+        approval_input["thread_id"] = body.thread_id
     try:
         _tf_post(
             f"/api/v1/sessions/{body.session_id}/turns",
-            {"input": [{"type": "tool_approval", "tool_call_id": body.action_id, "status": "allow"}]},
+            {"input": [approval_input]},
         )
         return {"success": True, "action_id": body.action_id, "status": "approved", "analyst": analyst}
     except RuntimeError:
@@ -137,12 +148,23 @@ def reject_containment(
     body: DecisionRequest,
     authorization: Optional[str] = Header(None),
 ):
-    """Reject via TrueForge. Sends deny decision."""
+    """
+    Reject a pending tool call via TrueForge.
+    Uses type: user.tool_approval with deny status and reason.
+    """
     analyst = _require_api_key(authorization)
+    reason = body.reason or f"Rejected by {analyst}"
+    approval_input = {
+        "type": "user.tool_approval",
+        "tool_call_id": body.action_id,
+        "approval": {"status": "deny", "reason": reason},
+    }
+    if body.thread_id:
+        approval_input["thread_id"] = body.thread_id
     try:
         _tf_post(
             f"/api/v1/sessions/{body.session_id}/turns",
-            {"input": [{"type": "tool_approval", "tool_call_id": body.action_id, "status": "deny", "reason": f"Rejected by {analyst}"}]},
+            {"input": [approval_input]},
         )
         return {"success": True, "action_id": body.action_id, "status": "rejected", "analyst": analyst}
     except RuntimeError:
@@ -151,7 +173,7 @@ def reject_containment(
 
 @router.get("/pending")
 def get_pending_approvals():
-    """List pending approvals from TrueForge sessions."""
+    """List sessions with pending approval state from TrueForge."""
     try:
         sessions = _tf_get("/api/v1/sessions")
         session_list = sessions.get("data", sessions) if isinstance(sessions, dict) else sessions
