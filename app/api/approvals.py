@@ -1,9 +1,10 @@
 """
 CyberForge Approval API — TrueForge native approval gate.
 
-Approvals are native TrueForge turn events. This API:
-1. Starts an agent turn that triggers the block_ip approval gate
-2. Forwards allow/deny decisions to resume the paused tool call
+TrueForge create-turn returns an SSE stream. This module:
+1. Sends turns (message or approval) via SSE-aware transport
+2. Reads events until turn.done or tool.approval_required
+3. Returns the terminal event as the response
 Requires CYBERFORGE_API_KEY for containment decisions.
 """
 
@@ -19,7 +20,6 @@ router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 
 TRUEFORGE_URL = os.environ.get("TRUEFORGE_URL", "http://localhost:8790")
 EXPECTED_API_KEY = os.environ.get("CYBERFORGE_API_KEY", "")
-AGENT_NAME = os.environ.get("CYBERFORGE_AGENT_NAME", "cyberforge-investigator")
 
 
 class ApprovalRequest(BaseModel):
@@ -46,20 +46,51 @@ def _require_api_key(authorization: Optional[str] = Header(None)) -> str:
     return "analyst"
 
 
-def _tf_post(path: str, body: dict) -> dict:
+def _tf_post_sse(path: str, body: dict) -> dict:
+    """
+    POST to TrueForge and consume the SSE stream.
+    Returns the last meaningful event (turn.done or error).
+    """
     url = f"{TRUEFORGE_URL}{path}"
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         url, data=data,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        },
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+
+            # If it's SSE, read the event stream
+            if "event-stream" in content_type or "text/plain" in content_type:
+                last_event = {}
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if line.startswith("data: "):
+                        payload = line[6:]
+                        if not payload.strip():
+                            continue
+                        try:
+                            event = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        last_event = event
+                        # Stop on terminal events
+                        etype = event.get("type", "")
+                        if etype in ("turn.done", "turn.failed", "error"):
+                            break
+                return last_event if last_event else {"status": "ok"}
+
+            # Otherwise it's regular JSON
             raw = resp.read().decode()
             if not raw.strip():
                 return {"status": "ok"}
             return json.loads(raw)
+
     except json.JSONDecodeError:
         raise RuntimeError("TrueForge returned invalid JSON")
     except urllib.error.HTTPError:
@@ -91,26 +122,20 @@ def request_containment_approval(
     authorization: Optional[str] = Header(None),
 ):
     """
-    Start an agent turn that will trigger the block_ip approval gate.
-    TrueForge pauses on block_ip (require_approval_for_tools) and
-    emits a tool.approval_required event with the tool_call_id.
+    Start an agent turn. TrueForge pauses on block_ip approval gate
+    and emits tool.approval_required in the SSE stream.
     """
     analyst = _require_api_key(authorization)
     try:
-        result = _tf_post(
+        result = _tf_post_sse(
             f"/api/v1/sessions/{body.session_id}/turns",
-            {
-                "input": [{
-                    "type": "user.message",
-                    "content": body.message,
-                }]
-            },
+            {"input": [{"type": "user.message", "content": body.message}]},
         )
         return {
             "success": True,
             "session_id": body.session_id,
             "analyst": analyst,
-            "trueforge_response": result,
+            "trueforge_event": result,
         }
     except RuntimeError:
         raise HTTPException(status_code=502, detail="TrueForge unavailable")
@@ -121,10 +146,7 @@ def approve_containment(
     body: DecisionRequest,
     authorization: Optional[str] = Header(None),
 ):
-    """
-    Approve a pending tool call via TrueForge.
-    Uses type: user.tool_approval with thread_id and nested approval object.
-    """
+    """Approve a pending tool call. Consumes SSE response."""
     analyst = _require_api_key(authorization)
     approval_input = {
         "type": "user.tool_approval",
@@ -134,11 +156,11 @@ def approve_containment(
     if body.thread_id:
         approval_input["thread_id"] = body.thread_id
     try:
-        _tf_post(
+        result = _tf_post_sse(
             f"/api/v1/sessions/{body.session_id}/turns",
             {"input": [approval_input]},
         )
-        return {"success": True, "action_id": body.action_id, "status": "approved", "analyst": analyst}
+        return {"success": True, "action_id": body.action_id, "status": "approved", "analyst": analyst, "trueforge_event": result}
     except RuntimeError:
         raise HTTPException(status_code=502, detail="TrueForge unavailable")
 
@@ -148,10 +170,7 @@ def reject_containment(
     body: DecisionRequest,
     authorization: Optional[str] = Header(None),
 ):
-    """
-    Reject a pending tool call via TrueForge.
-    Uses type: user.tool_approval with deny status and reason.
-    """
+    """Reject a pending tool call. Consumes SSE response."""
     analyst = _require_api_key(authorization)
     reason = body.reason or f"Rejected by {analyst}"
     approval_input = {
@@ -162,11 +181,11 @@ def reject_containment(
     if body.thread_id:
         approval_input["thread_id"] = body.thread_id
     try:
-        _tf_post(
+        result = _tf_post_sse(
             f"/api/v1/sessions/{body.session_id}/turns",
             {"input": [approval_input]},
         )
-        return {"success": True, "action_id": body.action_id, "status": "rejected", "analyst": analyst}
+        return {"success": True, "action_id": body.action_id, "status": "rejected", "analyst": analyst, "trueforge_event": result}
     except RuntimeError:
         raise HTTPException(status_code=502, detail="TrueForge unavailable")
 
