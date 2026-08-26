@@ -170,15 +170,42 @@ def request_containment_approval(
                 )
                 tool_call_id = tf_event.get("tool_call_id") or tf_event.get("tool_call", {}).get("id")
             except RuntimeError:
-                pass  # TrueForge unavailable
-
-        # Atomically persist tool_call_id, scoped to the action_id we just created
+                pass  # TrueForge unavailable        # Atomically persist tool_call_id, scoped to the action_id we just created
+        late_forward = None
         if tool_call_id:
-            set_approval_tool_call_id(local_session_id, result["action_id"], tool_call_id)
+            cas_result = set_approval_tool_call_id(
+                local_session_id, result["action_id"], tool_call_id
+            )
+            # If the approval was already decided before tool_call_id arrived,
+            # we must forward that decision to TrueForge now
+            if cas_result.get("pending_decision"):
+                late_forward = cas_result
+
+        # Forward a late-arriving decision to TrueForge
+        if late_forward and tf_session_id and tool_call_id:
+            decision = late_forward["pending_decision"]
+            decided_by = late_forward.get("decided_by", "analyst")
+            try:
+                if decision == "approved":
+                    _tf_post_sse(
+                        f"/api/v1/sessions/{tf_session_id}/turns",
+                        {"input": [{"type": "user.tool_approval",
+                                     "tool_call_id": tool_call_id,
+                                     "approval": {"status": "allow"}}]},
+                    )
+                elif decision == "rejected":
+                    _tf_post_sse(
+                        f"/api/v1/sessions/{tf_session_id}/turns",
+                        {"input": [{"type": "user.tool_approval",
+                                     "tool_call_id": tool_call_id,
+                                     "approval": {"status": "deny",
+                                                  "reason": f"Rejected by {decided_by}"}}]},
+                    )
+            except RuntimeError:
+                pass
 
         return {
-            "success": True,
-            "action_id": result["action_id"],
+            "success": True, "action_id": result["action_id"],
             "session_id": local_session_id,
             "trueforge_session_id": tf_session_id,
             "tool_call_id": tool_call_id,

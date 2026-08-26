@@ -281,6 +281,10 @@ def set_approval_tool_call_id(sid: str, action_id: str, tool_call_id: str) -> di
     Only writes if the current approval still belongs to the given
     action_id — prevents a stale TrueForge response from overwriting
     a newer approval's tool_call_id.
+
+    If the approval is already terminal (approved/rejected) when this
+    write arrives, returns ``pending_decision`` so the caller can
+    forward the late-arriving decision to TrueForge.
     """
     def _set(sessions):
         for s in sessions:
@@ -293,7 +297,15 @@ def set_approval_tool_call_id(sid: str, action_id: str, tool_call_id: str) -> di
                 return {"success": False, "error": "Approval already replaced by a newer request"}
             ap["tool_call_id"] = tool_call_id
             s["updated_at"] = datetime.now(timezone.utc).isoformat()
-            return {"success": True, "action_id": ap["action_id"]}
+            # If already decided, the caller must forward to TrueForge
+            current_status = ap.get("status")
+            if current_status in ("approved", "rejected"):
+                return {
+                    "success": True, "action_id": action_id,
+                    "pending_decision": current_status,
+                    "decided_by": ap.get("decided_by"),
+                }
+            return {"success": True, "action_id": action_id}
         return {"success": False, "error": "Session not found"}
     return _mutate_sessions(_set)
 
