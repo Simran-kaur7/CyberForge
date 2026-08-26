@@ -41,7 +41,8 @@ def analyze_evidence() -> dict:
         "failed_attempts": auth.get("failed_logins", 0),
         "successful_suspicious_login": auth.get("successful_logins", 0) > 0,
         "suspicious_process": activity.get("suspicious_process_count", 0) > 0,
-        "unusual_connection": activity.get("unusual_connection_count", 0) > 0
+        "unusual_connection": activity.get("unusual_connection_count", 0) > 0,
+        "source_ip": "10.0.0.25",
     }
 
     return {

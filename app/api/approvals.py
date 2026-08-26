@@ -1,22 +1,22 @@
 """
-CyberForge Approval API — connects to TrueForge's native approval gate.
+CyberForge Approval API — TrueForge native approval gate.
 
-When the agent tries to call block_ip (which requires approval),
-TrueForge pauses the turn and surfaces a pending-approval state.
-This API forwards approve/reject decisions to TrueForge via HTTP,
-which then resumes the agent turn with the decision.
+Forwards approve/reject to TrueForge's HTTP API.
+Requires CYBERFORGE_API_KEY for containment decisions.
 """
 
 import os
 import json
 import urllib.request
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
+from typing import Optional
 
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 
 TRUEFORGE_URL = os.environ.get("TRUEFORGE_URL", "http://localhost:8790")
+EXPECTED_API_KEY = os.environ.get("CYBERFORGE_API_KEY", "")
 
 
 class ApprovalRequest(BaseModel):
@@ -28,15 +28,24 @@ class ApprovalRequest(BaseModel):
 class DecisionRequest(BaseModel):
     session_id: str
     action_id: str
-    decided_by: str = "analyst"
+    # Bug #1: removed decided_by from body — derived from auth context
 
 
-class TrueForgeTurnRequest(BaseModel):
-    input: list
+def _require_api_key(authorization: Optional[str] = Header(None)) -> str:
+    """Validate API key. Returns the analyst identity."""
+    if not EXPECTED_API_KEY:
+        # Lab mode: no key configured, use default identity
+        return "analyst"
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    token = authorization.replace("Bearer ", "").strip()
+    if token != EXPECTED_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    return "analyst"
 
 
 def _tf_post(path: str, body: dict) -> dict:
-    """Make a POST request to the TrueForge HTTP API."""
+    """POST to TrueForge HTTP API."""
     url = f"{TRUEFORGE_URL}{path}"
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
@@ -48,134 +57,104 @@ def _tf_post(path: str, body: dict) -> dict:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode() if exc.fp else ""
-        raise RuntimeError(
-            f"TrueForge API error {exc.code}: {error_body}"
-        ) from exc
+        raise RuntimeError(f"TrueForge returned HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(
-            f"Cannot reach TrueForge at {TRUEFORGE_URL}: {exc.reason}"
-        ) from exc
+        raise RuntimeError(f"Cannot reach TrueForge") from exc
 
 
 def _tf_get(path: str) -> dict:
-    """Make a GET request to the TrueForge HTTP API."""
+    """GET from TrueForge HTTP API."""
     url = f"{TRUEFORGE_URL}{path}"
     req = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode() if exc.fp else ""
-        raise RuntimeError(
-            f"TrueForge API error {exc.code}: {error_body}"
-        ) from exc
+        raise RuntimeError(f"TrueForge returned HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(
-            f"Cannot reach TrueForge at {TRUEFORGE_URL}: {exc.reason}"
-        ) from exc
+        raise RuntimeError(f"Cannot reach TrueForge") from exc
 
 
 @router.post("/request")
-def request_containment_approval(body: ApprovalRequest):
-    """
-    Request human approval for a containment action.
-
-    In the TrueForge flow, this is handled natively:
-    the agent calls block_ip, TrueForge pauses, and the turn
-    ends with required_actions containing the pending approval.
-    This endpoint just returns the pending state for the UI.
-    """
+def request_containment_approval(
+    body: ApprovalRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Request approval. Requires authenticated analyst."""
+    analyst = _require_api_key(authorization)
     return {
         "success": True,
         "status": "pending",
-        "message": f"Approval requested for {body.action_type} on session {body.session_id}",
-        "trueforge_url": TRUEFORGE_URL,
+        "action_type": body.action_type,
+        "session_id": body.session_id,
+        "analyst": analyst,
     }
 
 
 @router.post("/approve")
-def approve_containment(body: DecisionRequest):
-    """
-    Approve a pending containment action via TrueForge.
-
-    Sends a new turn to TrueForge with the approval decision,
-    which resumes the agent and allows it to call block_ip.
-    """
+def approve_containment(
+    body: DecisionRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Approve via TrueForge. Requires authenticated analyst."""
+    analyst = _require_api_key(authorization)
     try:
         result = _tf_post(
             f"/api/v1/sessions/{body.session_id}/turns",
             {
-                "input": [
-                    {
-                        "type": "tool_approval",
-                        "tool_call_id": body.action_id,
-                        "status": "allow",
-                    }
-                ]
+                "input": [{
+                    "type": "tool_approval",
+                    "tool_call_id": body.action_id,
+                    "status": "allow",
+                }]
             },
         )
         return {
-            "success": True,
-            "action_id": body.action_id,
-            "status": "approved",
-            "trueforge_response": result,
+            "success": True, "action_id": body.action_id,
+            "status": "approved", "analyst": analyst,
         }
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to forward approval to TrueForge: {exc}",
-        )
+    except RuntimeError:
+        raise HTTPException(status_code=502, detail="TrueForge unavailable")
 
 
 @router.post("/reject")
-def reject_containment(body: DecisionRequest):
-    """
-    Reject a pending containment action via TrueForge.
-
-    Sends a denial to TrueForge — the agent receives the rejection
-    and must not proceed with the action.
-    """
+def reject_containment(
+    body: DecisionRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Reject via TrueForge. Requires authenticated analyst."""
+    analyst = _require_api_key(authorization)
     try:
         result = _tf_post(
             f"/api/v1/sessions/{body.session_id}/turns",
             {
-                "input": [
-                    {
-                        "type": "tool_approval",
-                        "tool_call_id": body.action_id,
-                        "status": "deny",
-                        "reason": f"Rejected by {body.decided_by}",
-                    }
-                ]
+                "input": [{
+                    "type": "tool_approval",
+                    "tool_call_id": body.action_id,
+                    "status": "deny",
+                    "reason": f"Rejected by {analyst}",
+                }]
             },
         )
         return {
-            "success": True,
-            "action_id": body.action_id,
-            "status": "rejected",
-            "trueforge_response": result,
+            "success": True, "action_id": body.action_id,
+            "status": "rejected", "analyst": analyst,
         }
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to forward rejection to TrueForge: {exc}",
-        )
+    except RuntimeError:
+        raise HTTPException(status_code=502, detail="TrueForge unavailable")
 
 
 @router.get("/pending")
 def get_pending_approvals():
-    """
-    List sessions with pending approval state from TrueForge.
-    """
+    """List pending approvals from TrueForge sessions."""
     try:
         sessions = _tf_get("/api/v1/sessions")
         session_list = sessions.get("data", sessions) if isinstance(sessions, dict) else sessions
         pending = []
         if isinstance(session_list, list):
             for s in session_list:
-                state = s.get("state", {})
-                actions = state.get("required_actions", [])
+                state = s.get("state") or {}
+                actions = state.get("required_actions") or []
                 if actions:
                     pending.append({
                         "session_id": s.get("id"),
@@ -183,9 +162,6 @@ def get_pending_approvals():
                         "required_actions": actions,
                     })
         return {"count": len(pending), "approvals": pending}
-    except RuntimeError as exc:
-        return {
-            "count": 0,
-            "approvals": [],
-            "warning": f"Could not reach TrueForge: {exc}",
-        }
+    except RuntimeError:
+        # Bug #2: don't crash — return empty with warning
+        return {"count": 0, "approvals": [], "warning": "TrueForge unavailable"}
