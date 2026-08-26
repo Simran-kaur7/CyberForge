@@ -308,6 +308,30 @@ def request_containment_approval(
                 tool_call_id = tf_event.get("tool_call_id")
                 thread_id = tf_event.get("thread_id")
 
+                # A successful TrueForge turn may complete without requesting
+                # tool approval. Release the forwarding claim so the local
+                # approval is not stranded as permanently in-flight.
+                if not tool_call_id:
+                    release_request_claim(
+                        local_session_id,
+                        action_id,
+                    )
+                    return {
+                        "success": False,
+                        "action_id": action_id,
+                        "session_id": local_session_id,
+                        "trueforge_session_id": tf_session_id,
+                        "tool_call_id": None,
+                        "thread_id": thread_id,
+                        "analyst": analyst,
+                        "trueforge_event": tf_event,
+                        "error": (
+                            "TrueForge completed without requesting "
+                            "tool approval"
+                        ),
+                        "retryable": True,
+                    }
+
             except RuntimeError as exc:
                 # Release request claim upon failure so concurrent retries can run
                 release_request_claim(local_session_id, action_id)
