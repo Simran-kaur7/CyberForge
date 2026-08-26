@@ -229,4 +229,12 @@ function initTimeline() {
 
   // Pre-populate with investigation events
   const events = [
-    { type: 'investigation', message: 'Authentication log search initiated for 10.0.0.25', timestamp: '2026-08-24T10:07:00Z' 
+    { type: 'investigation', message: 'Authentication log search initiated for 10.0.0.25', timestamp: '2026-08-24T10:07:00Z' },
+    { type: 'result', message: 'Found 48 matching auth events', timestamp: '2026-08-24T10:07:05Z' },
+    { type: 'analysis', message: 'Risk score calculated: CRITICAL', timestamp: '2026-08-24T10:07:10Z' },
+  ];
+
+  events.forEach(event => {
+    stream.addEvent(event.type, event.message, event.timestamp);
+  });
+}
