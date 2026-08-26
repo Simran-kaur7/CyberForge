@@ -19,9 +19,9 @@ if platform.system() == "Windows":
 else:
     import fcntl
     def _lock_file(fd):
-        _lock_file(fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
     def _unlock_file(fd):
-        _unlock_file(fd)
+        fcntl.flock(fd, fcntl.LOCK_UN)
 import json
 import subprocess
 import uuid
