@@ -210,6 +210,194 @@ def request_approval(sid: str, atype: str, adetail: dict) -> dict:
     return _mutate_sessions(_req)
 
 
+def _validate_decision_ids(
+    session: dict,
+    current: dict,
+    expected_tool_call_id: str | None,
+    expected_trueforge_session_id: str | None,
+) -> tuple[bool, str | None]:
+    stored_tool_call_id = current.get("tool_call_id")
+    stored_tf_session_id = session.get("trueforge_session_id")
+
+    if expected_tool_call_id and stored_tool_call_id:
+        if expected_tool_call_id != stored_tool_call_id:
+            return False, "tool_call_id does not belong to this action"
+    elif expected_tool_call_id and not stored_tool_call_id:
+        return False, "No authoritative tool_call_id is stored for this action"
+
+    if expected_trueforge_session_id and stored_tf_session_id:
+        if expected_trueforge_session_id != stored_tf_session_id:
+            return False, "trueforge_session_id does not belong to this action"
+    elif expected_trueforge_session_id and not stored_tf_session_id:
+        return False, "No authoritative trueforge_session_id is stored for this action"
+
+    return True, None
+
+
+def prepare_decision(
+    sid: str,
+    aid: str,
+    decision: str,
+    decided_by: str = "analyst",
+    expected_tool_call_id: str | None = None,
+    expected_trueforge_session_id: str | None = None,
+) -> dict:
+    """Atomically reserve a pending decision before forwarding it upstream.
+
+    The local action remains pending until the TrueForge decision is successfully
+    delivered. This makes upstream failures retryable and prevents two concurrent
+    requests from making opposite decisions for the same action.
+    """
+    if decision not in ("approved", "rejected"):
+        return {"success": False, "error": "Invalid decision"}
+
+    def _prepare(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+
+            current = s.get("approval_state")
+            if not current or current.get("action_id") != aid:
+                return {"success": False, "error": "No matching pending approval"}
+
+            if current.get("status") != "pending":
+                return {
+                    "success": False,
+                    "error": f"Action already {current.get('status')}",
+                }
+
+            valid, error = _validate_decision_ids(
+                s,
+                current,
+                expected_tool_call_id,
+                expected_trueforge_session_id,
+            )
+            if not valid:
+                return {"success": False, "error": error}
+
+            reservation = current.get("decision_in_progress")
+            if reservation:
+                return {
+                    "success": False,
+                    "error": "A decision is already being forwarded",
+                }
+
+            token = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+            current["decision_in_progress"] = {
+                "token": token,
+                "decision": decision,
+                "decided_by": decided_by,
+                "started_at": now,
+            }
+
+            for action in s.get("actions", []):
+                if action.get("action_id") == aid:
+                    action["decision_in_progress"] = dict(
+                        current["decision_in_progress"]
+                    )
+                    break
+
+            s["updated_at"] = now
+            return {
+                "success": True,
+                "action_id": aid,
+                "decision": decision,
+                "token": token,
+                "tool_call_id": current.get("tool_call_id"),
+                "trueforge_session_id": s.get("trueforge_session_id"),
+                "thread_id": current.get("thread_id"),
+            }
+
+        return {"success": False, "error": "Session not found"}
+
+    return _mutate_sessions(_prepare)
+
+
+def complete_decision(sid: str, aid: str, token: str) -> dict:
+    """Finalize a decision after TrueForge accepted the forwarded request."""
+    def _complete(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+
+            current = s.get("approval_state")
+            if not current or current.get("action_id") != aid:
+                return {"success": False, "error": "Action not found"}
+
+            reservation = current.get("decision_in_progress")
+            if not reservation or reservation.get("token") != token:
+                return {"success": False, "error": "Decision reservation is no longer valid"}
+
+            decision = reservation["decision"]
+            now = datetime.now(timezone.utc).isoformat()
+            current["status"] = decision
+            current["decided_at"] = now
+            current["decided_by"] = reservation.get("decided_by", "analyst")
+            current.pop("decision_in_progress", None)
+            current.pop("forward_error", None)
+
+            for action in s.get("actions", []):
+                if action.get("action_id") == aid:
+                    action["status"] = decision
+                    action["decided_at"] = now
+                    action["decided_by"] = reservation.get("decided_by", "analyst")
+                    action.pop("decision_in_progress", None)
+                    action.pop("forward_error", None)
+                    break
+
+            s["updated_at"] = now
+            return {
+                "success": True,
+                "action_id": aid,
+                "status": decision,
+                "tool_call_id": current.get("tool_call_id"),
+                "trueforge_session_id": s.get("trueforge_session_id"),
+            }
+
+        return {"success": False, "error": "Session not found"}
+
+    return _mutate_sessions(_complete)
+
+
+def fail_decision(sid: str, aid: str, token: str, error: str) -> dict:
+    """Release a failed upstream decision while keeping the local action pending."""
+    def _fail(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+
+            current = s.get("approval_state")
+            if not current or current.get("action_id") != aid:
+                return {"success": False, "error": "Action not found"}
+
+            reservation = current.get("decision_in_progress")
+            if not reservation or reservation.get("token") != token:
+                return {"success": False, "error": "Decision reservation is no longer valid"}
+
+            current.pop("decision_in_progress", None)
+            current["forward_error"] = error
+            now = datetime.now(timezone.utc).isoformat()
+
+            for action in s.get("actions", []):
+                if action.get("action_id") == aid:
+                    action.pop("decision_in_progress", None)
+                    action["forward_error"] = error
+                    break
+
+            s["updated_at"] = now
+            return {
+                "success": True,
+                "action_id": aid,
+                "status": current.get("status", "pending"),
+                "retryable": True,
+            }
+
+        return {"success": False, "error": "Session not found"}
+
+    return _mutate_sessions(_fail)
+
+
 def approve_action(
     sid: str,
     aid: str,
@@ -217,86 +405,44 @@ def approve_action(
     expected_tool_call_id: str | None = None,
     expected_trueforge_session_id: str | None = None,
 ) -> dict:
-    """Approve only if status is pending and IDs match."""
+    """Legacy local-only approval helper; use prepare/complete for upstream forwarding."""
     def _approve(sessions):
         for s in sessions:
             if s["id"] != sid:
                 continue
-
             current = s.get("approval_state")
-
             if not current or current.get("action_id") != aid:
-                return {
-                    "success": False,
-                    "error": "No matching pending approval",
-                }
-
-            if current["status"] != "pending":
-                return {
-                    "success": False,
-                    "error": f"Action already {current['status']}",
-                }
-
-            stored_tool_call_id = current.get("tool_call_id")
-            stored_tf_session_id = s.get(
-                "trueforge_session_id"
+                return {"success": False, "error": "No matching pending approval"}
+            if current.get("status") != "pending":
+                return {"success": False, "error": f"Action already {current.get('status')}"}
+            valid, error = _validate_decision_ids(
+                s, current, expected_tool_call_id, expected_trueforge_session_id
             )
-
-            if (
-                expected_tool_call_id
-                and stored_tool_call_id
-                and expected_tool_call_id != stored_tool_call_id
-            ):
-                return {
-                    "success": False,
-                    "error": (
-                        "tool_call_id does not belong "
-                        "to this action"
-                    ),
-                }
-
-            if (
-                expected_trueforge_session_id
-                and stored_tf_session_id
-                and expected_trueforge_session_id
-                != stored_tf_session_id
-            ):
-                return {
-                    "success": False,
-                    "error": (
-                        "trueforge_session_id does not "
-                        "belong to this action"
-                    ),
-                }
-
+            if not valid:
+                return {"success": False, "error": error}
             now = datetime.now(timezone.utc).isoformat()
-
             current["status"] = "approved"
             current["decided_at"] = now
             current["decided_by"] = decided_by
-
+            for action in s.get("actions", []):
+                if action.get("action_id") == aid:
+                    action.update(
+                        status="approved",
+                        decided_at=now,
+                        decided_by=decided_by,
+                    )
+                    break
             s["updated_at"] = now
-
-            for a in s["actions"]:
-                if a["action_id"] == aid:
-                    a["status"] = "approved"
-                    a["decided_at"] = now
-                    a["decided_by"] = decided_by
-
             return {
                 "success": True,
                 "action_id": aid,
                 "status": "approved",
-                "tool_call_id": stored_tool_call_id,
-                "trueforge_session_id": stored_tf_session_id,
+                "tool_call_id": current.get("tool_call_id"),
+                "trueforge_session_id": s.get("trueforge_session_id"),
             }
-
-        return {
-            "success": False,
-            "error": "Session not found",
-        }
-
+        return {"success": False, "error": "Session not found"}
     return _mutate_sessions(_approve)
+
 
 def reject_action(
     sid: str,
@@ -305,85 +451,42 @@ def reject_action(
     expected_tool_call_id: str | None = None,
     expected_trueforge_session_id: str | None = None,
 ) -> dict:
-    """Reject only if status is pending and IDs match."""
+    """Legacy local-only rejection helper; use prepare/complete for upstream forwarding."""
     def _reject(sessions):
         for s in sessions:
             if s["id"] != sid:
                 continue
-
             current = s.get("approval_state")
-
             if not current or current.get("action_id") != aid:
-                return {
-                    "success": False,
-                    "error": "No matching pending approval",
-                }
-
-            if current["status"] != "pending":
-                return {
-                    "success": False,
-                    "error": f"Action already {current['status']}",
-                }
-
-            stored_tool_call_id = current.get("tool_call_id")
-            stored_tf_session_id = s.get(
-                "trueforge_session_id"
+                return {"success": False, "error": "No matching pending approval"}
+            if current.get("status") != "pending":
+                return {"success": False, "error": f"Action already {current.get('status')}"}
+            valid, error = _validate_decision_ids(
+                s, current, expected_tool_call_id, expected_trueforge_session_id
             )
-
-            if (
-                expected_tool_call_id
-                and stored_tool_call_id
-                and expected_tool_call_id != stored_tool_call_id
-            ):
-                return {
-                    "success": False,
-                    "error": (
-                        "tool_call_id does not belong "
-                        "to this action"
-                    ),
-                }
-
-            if (
-                expected_trueforge_session_id
-                and stored_tf_session_id
-                and expected_trueforge_session_id
-                != stored_tf_session_id
-            ):
-                return {
-                    "success": False,
-                    "error": (
-                        "trueforge_session_id does not "
-                        "belong to this action"
-                    ),
-                }
-
+            if not valid:
+                return {"success": False, "error": error}
             now = datetime.now(timezone.utc).isoformat()
-
             current["status"] = "rejected"
             current["decided_at"] = now
             current["decided_by"] = decided_by
-
+            for action in s.get("actions", []):
+                if action.get("action_id") == aid:
+                    action.update(
+                        status="rejected",
+                        decided_at=now,
+                        decided_by=decided_by,
+                    )
+                    break
             s["updated_at"] = now
-
-            for a in s["actions"]:
-                if a["action_id"] == aid:
-                    a["status"] = "rejected"
-                    a["decided_at"] = now
-                    a["decided_by"] = decided_by
-
             return {
                 "success": True,
                 "action_id": aid,
                 "status": "rejected",
-                "tool_call_id": stored_tool_call_id,
-                "trueforge_session_id": stored_tf_session_id,
+                "tool_call_id": current.get("tool_call_id"),
+                "trueforge_session_id": s.get("trueforge_session_id"),
             }
-
-        return {
-            "success": False,
-            "error": "Session not found",
-        }
-
+        return {"success": False, "error": "Session not found"}
     return _mutate_sessions(_reject)
 
 def update_session(sid: str, **kw) -> dict:
@@ -397,60 +500,92 @@ def update_session(sid: str, **kw) -> dict:
     return _mutate_sessions(_update)
 
 
-def set_approval_tool_call_id(sid: str, action_id: str, tool_call_id: str) -> dict:
-    """Atomically set tool_call_id and claim forwarding ownership.
-
-    Resolution order:
-    1. If the current approval_state matches action_id, write there.
-    2. Otherwise search the actions[] history for a terminal match.
-    3. If the action is terminal, return pending_decision so the
-       caller can forward to TrueForge.
-
-    Sets forwarded_to_trueforge=False on the matching action to
-    claim forwarding ownership — only one handler will forward.
-    """
+def set_approval_tool_call_id(
+    sid: str,
+    action_id: str,
+    tool_call_id: str,
+    thread_id: str | None = None,
+) -> dict:
+    """Atomically bind the TrueForge call/thread to a local approval action."""
     def _set(sessions):
         for s in sessions:
             if s["id"] != sid:
                 continue
 
+            target = None
             ap = s.get("approval_state")
-            target = None  # the approval dict to write tool_call_id into
-
-            # Case 1: current approval matches
             if ap and ap.get("action_id") == action_id:
                 target = ap
 
-            # Case 2: look in actions[] history
             if target is None:
-                for a in s.get("actions", []):
-                    if a.get("action_id") == action_id:
-                        target = a
+                for action in s.get("actions", []):
+                    if action.get("action_id") == action_id:
+                        target = action
                         break
 
             if target is None:
                 return {"success": False, "error": "Action not found"}
 
             target["tool_call_id"] = tool_call_id
-            s["updated_at"] = datetime.now(timezone.utc).isoformat()
+            if thread_id:
+                target["thread_id"] = thread_id
 
+            # Keep the top-level approval state and action history synchronized
+            # after JSON reload, where they are separate dictionaries.
+            if ap and ap.get("action_id") == action_id and target is not ap:
+                ap["tool_call_id"] = tool_call_id
+                if thread_id:
+                    ap["thread_id"] = thread_id
+
+            for action in s.get("actions", []):
+                if action.get("action_id") == action_id and action is not target:
+                    action["tool_call_id"] = tool_call_id
+                    if thread_id:
+                        action["thread_id"] = thread_id
+                    target = action if target is None else target
+
+            s["updated_at"] = datetime.now(timezone.utc).isoformat()
             current_status = target.get("status")
+
             if current_status in ("approved", "rejected"):
-                # Claim forwarding ownership — only first caller wins
-                if not target.get("forwarded_to_trueforge"):
-                    target["forwarded_to_trueforge"] = True
-                    return {
-                        "success": True, "action_id": action_id,
-                        "pending_decision": current_status,
-                        "decided_by": target.get("decided_by"),
-                    }
-                # Already forwarded by another handler
-                return {"success": True, "action_id": action_id, "already_forwarded": True}
+                for action in s.get("actions", []):
+                    if action.get("action_id") == action_id:
+                        if not action.get("forwarded_to_trueforge"):
+                            action["forwarded_to_trueforge"] = True
+                            return {
+                                "success": True,
+                                "action_id": action_id,
+                                "pending_decision": current_status,
+                                "decided_by": action.get("decided_by"),
+                            }
+                        return {
+                            "success": True,
+                            "action_id": action_id,
+                            "already_forwarded": True,
+                        }
 
             return {"success": True, "action_id": action_id}
+
         return {"success": False, "error": "Session not found"}
+
     return _mutate_sessions(_set)
 
+
+def release_forwarding_claim(sid: str, action_id: str, error: str) -> dict:
+    """Release a late-forward claim after an upstream delivery failure."""
+    def _release(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+            for action in s.get("actions", []):
+                if action.get("action_id") == action_id:
+                    action["forwarded_to_trueforge"] = False
+                    action["forward_error"] = error
+                    s["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    return {"success": True, "action_id": action_id, "retryable": True}
+            return {"success": False, "error": "Action not found"}
+        return {"success": False, "error": "Session not found"}
+    return _mutate_sessions(_release)
 
 def persist_trueforge_session_id(sid: str, tf_session_id: str) -> dict:
     """Atomically persist a TrueForge session ID on the local session.
