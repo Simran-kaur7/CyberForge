@@ -14,6 +14,16 @@ from app.sdk_client import (
 router = APIRouter(prefix="/api", tags=["incidents"])
 
 
+def _require_successful_tool_result(result: object, tool_name: str) -> dict:
+    """Return a valid tool response or fail the investigation cleanly."""
+    if not isinstance(result, dict) or not result.get("success"):
+        raise HTTPException(
+            status_code=502,
+            detail=f"{tool_name} did not return usable investigation evidence.",
+        )
+    return result
+
+
 @router.get("/sessions")
 def get_sessions():
     """List all investigation sessions."""
@@ -29,7 +39,9 @@ def investigate_incident(incident_id: str):
         )
 
     try:
-        analysis = analyze_evidence()
+        analysis = _require_successful_tool_result(
+            analyze_evidence(), "Evidence analysis"
+        )
         source_ip = analysis.get("source_ip")
 
         if not source_ip:
@@ -38,8 +50,12 @@ def investigate_incident(incident_id: str):
                 detail="Evidence analysis did not return a source IP.",
             )
 
-        logs = search_security_logs(source_ip)
-        activity = check_system_activity()
+        logs = _require_successful_tool_result(
+            search_security_logs(source_ip), "Security log search"
+        )
+        activity = _require_successful_tool_result(
+            check_system_activity(), "System activity check"
+        )
 
     except HTTPException:
         raise
