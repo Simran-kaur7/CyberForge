@@ -224,10 +224,12 @@
       document.getElementById('resolved-count').textContent = resolved.length + ' resolved';
 
       // Compute average risk score from active sessions
+      // Only include sessions that actually have a risk_score (not null/undefined)
       const riskScores = active.map(s => {
-        if (s.risk_score && typeof s.risk_score === 'object') return s.risk_score.score || 0;
-        return Number(s.risk_score) || 0;
-      }).filter(n => n > 0);
+        if (s.risk_score && typeof s.risk_score === 'object') return s.risk_score.score;
+        if (s.risk_score !== null && s.risk_score !== undefined) return Number(s.risk_score);
+        return null;
+      }).filter(n => n !== null);
       const avgRisk = riskScores.length > 0 ? Math.round(riskScores.reduce((a,b)=>a+b,0) / riskScores.length) : '--';
       document.getElementById('stat-risk').textContent = avgRisk;
 
@@ -263,7 +265,8 @@
         row.className = 'row';
         const badge = document.createElement('span');
         badge.className = 'risk-badge risk-' + riskLevel;
-        badge.textContent = riskScore > 0 ? riskLevel.toUpperCase() + ' ' + riskScore : 'Unassessed';
+        var hasAssessed = s.risk_score !== null && s.risk_score !== undefined;
+        badge.textContent = hasAssessed ? riskLevel.toUpperCase() + ' ' + riskScore : 'Unassessed';
         row.appendChild(badge);
 n        const btn = document.createElement('button');
         btn.className = 'btn btn-open';
