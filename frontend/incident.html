@@ -417,16 +417,72 @@
   // ============================================================
   //  APPROVE / REJECT
   //  Flow: request approval (creates pending action) → approve/reject
+  //
+  //  IMPORTANT: every fetch below is parsed into { httpOk, status, body }
+  //  and treated as a *backend failure* whenever httpOk is false OR the
+  //  body says success:false — regardless of HTTP status. A backend
+  //  failure is never silently treated as success, and it never falls
+  //  through to the "demo mode" fallback. The demo-mode fallback is
+  //  reserved for genuine connectivity failures, i.e. fetch() itself
+  //  rejecting because the backend can't be reached at all.
   // ============================================================
   var pendingLocalActionId = null;
   var pendingToolCallId = null;
+
+  function parseJsonResponse(r) {
+    return r.json()
+      .catch(function () { return null; })
+      .then(function (body) {
+        return { httpOk: r.ok, status: r.status, body: body };
+      });
+  }
+
+  function backendErrorMessage(body, fallback) {
+    return (body && (body.error || body.detail)) || fallback;
+  }
+
+  function isRetryableFailure(parsed) {
+    if (parsed.body && parsed.body.retryable) return true;
+    // Treat 5xx (upstream/forwarding failures) as retryable by default;
+    // 4xx generally signals a real mismatch that a bare retry won't fix.
+    return parsed.status >= 500;
+  }
+
+  function resetDecisionButtons() {
+    var approveBtn = document.getElementById('approve-button');
+    var rejectBtn = document.getElementById('reject-button');
+    approveBtn.disabled = false;
+    rejectBtn.disabled = false;
+    approveBtn.textContent = 'Approve';
+    rejectBtn.textContent = 'Reject';
+  }
+
+  function showBackendFailure(message, retryable) {
+    var resultEl = document.getElementById('decision-result');
+    resultEl.className = 'decision-result rejected';
+    resultEl.textContent = retryable
+      ? 'Decision not recorded — ' + message + '. Please retry.'
+      : 'Decision failed — ' + message;
+    toast(retryable ? 'Please retry: ' + message : 'Decision failed: ' + message, 'error');
+  }
 
   function sendDecision(decision) {
     var btn = decision === 'approve' ? document.getElementById('approve-button') : document.getElementById('reject-button');
     btn.disabled = true;
     btn.textContent = decision === 'approve' ? 'Approving\u2026' : 'Rejecting\u2026';
 
-    // If we don't have a pending action_id yet, request one first
+    // If we don't have a pending action_id yet, request one first.
+    // A BackendFailureError means we got a real response from the server
+    // that indicates failure (e.g. no tool approval was requested, or a
+    // conflict) — this must propagate to the outer .catch as a genuine
+    // failure, not be swallowed into a fabricated action_id.
+    function BackendFailureError(message, retryable) {
+      this.message = message;
+      this.retryable = retryable;
+      this.isBackendError = true;
+    }
+    BackendFailureError.prototype = Object.create(Error.prototype);
+
     var actionIdPromise = pendingLocalActionId
       ? Promise.resolve(pendingLocalActionId)
       : fetch(API_BASE + '/api/approvals/request', {
@@ -438,21 +494,25 @@
             message: 'Investigate and contain ' + incidentId
           })
         })
-        .then(function (r) {
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          return r.json();
-        })
-        .then(function (res) {
+        .then(parseJsonResponse)
+        .then(function (parsed) {
+          var body = parsed.body;
+          if (!parsed.httpOk || !body || body.success === false) {
+            throw new BackendFailureError(
+              backendErrorMessage(body, 'Could not create the containment request'),
+              isRetryableFailure(parsed)
+            );
+          }
           // Preserve all IDs: local action_id for CyberForge, tool_call_id for TrueForge
-          pendingLocalActionId = res.action_id || null;
-          pendingToolCallId = res.tool_call_id || null;
+          pendingLocalActionId = body.action_id || null;
+          pendingToolCallId = body.tool_call_id || null;
           // Update trueforgeSessionId if the backend resolved a new one
-          if (res.trueforge_session_id) trueforgeSessionId = res.trueforge_session_id;
-          return pendingLocalActionId || incidentId;
-        })
-        .catch(function () {
-          return incidentId;
+          if (body.trueforge_session_id) trueforgeSessionId = body.trueforge_session_id;
+          return pendingLocalActionId;
         });
+        // NOTE: no .catch() here — a BackendFailureError (or a fetch()
+        // network rejection) must fall through to the outer .catch below
+        // so it's handled explicitly rather than papered over.
 
     actionIdPromise.then(function (localActionId) {
       var url = API_BASE + '/api/approvals/' + decision;
@@ -470,12 +530,15 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       })
-      .then(function (r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
-      .then(function (res) {
-        if (!res.success) throw new Error(res.error || 'Decision failed');
+      .then(parseJsonResponse)
+      .then(function (parsed) {
+        var resBody = parsed.body;
+        if (!parsed.httpOk || !resBody || !resBody.success) {
+          throw new BackendFailureError(
+            backendErrorMessage(resBody, 'The decision could not be confirmed'),
+            isRetryableFailure(parsed)
+          );
+        }
         var resultEl = document.getElementById('decision-result');
         if (decision === 'approve') {
           resultEl.className = 'decision-result approved';
@@ -492,8 +555,18 @@
         document.getElementById('reject-button').disabled = true;
       });
     })
-    .catch(function () {
-      // Demo fallback when backend is not running
+    .catch(function (err) {
+      resetDecisionButtons();
+
+      if (err && err.isBackendError) {
+        // A real backend response told us this failed. Never fabricate a
+        // success message here — surface the retry guidance instead.
+        showBackendFailure(err.message, err.retryable);
+        return;
+      }
+
+      // Only genuine connectivity failures (fetch() rejected outright,
+      // e.g. the backend process isn't running) fall back to demo mode.
       var resultEl = document.getElementById('decision-result');
       if (decision === 'approve') {
         resultEl.className = 'decision-result approved';

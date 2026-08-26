@@ -12,6 +12,7 @@ import os
 import json
 import urllib.request
 from fastapi import APIRouter, HTTPException, Header
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
@@ -311,26 +312,35 @@ def request_containment_approval(
                 # A successful TrueForge turn may complete without requesting
                 # tool approval. Release the forwarding claim so the local
                 # approval is not stranded as permanently in-flight.
+                #
+                # This must NOT be a plain 200 — a 200 tells the frontend's
+                # response.ok check that the request succeeded, so it would
+                # proceed to bind and decide an action_id with no tool_call_id
+                # behind it. Returning 409 here makes response.ok false and
+                # routes the client into its retry/error handling instead.
                 if not tool_call_id:
                     release_request_claim(
                         local_session_id,
                         action_id,
                     )
-                    return {
-                        "success": False,
-                        "action_id": action_id,
-                        "session_id": local_session_id,
-                        "trueforge_session_id": tf_session_id,
-                        "tool_call_id": None,
-                        "thread_id": thread_id,
-                        "analyst": analyst,
-                        "trueforge_event": tf_event,
-                        "error": (
-                            "TrueForge completed without requesting "
-                            "tool approval"
-                        ),
-                        "retryable": True,
-                    }
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "success": False,
+                            "action_id": action_id,
+                            "session_id": local_session_id,
+                            "trueforge_session_id": tf_session_id,
+                            "tool_call_id": None,
+                            "thread_id": thread_id,
+                            "analyst": analyst,
+                            "trueforge_event": tf_event,
+                            "error": (
+                                "TrueForge completed without requesting "
+                                "tool approval"
+                            ),
+                            "retryable": True,
+                        },
+                    )
 
             except RuntimeError as exc:
                 # Release request claim upon failure so concurrent retries can run
