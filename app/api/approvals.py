@@ -251,12 +251,21 @@ def request_containment_approval(
                 local_session_id,
                 actual_incident_id,
             )
+
             persisted = persist_trueforge_session_id(
                 local_session_id,
                 body.trueforge_session_id,
             )
+
             if not persisted.get("success"):
-                raise HTTPException(status_code=409, detail=persisted.get("error", "Session update failed"))
+                raise HTTPException(
+                    status_code=409,
+                    detail=persisted.get(
+                        "error",
+                        "Session update failed",
+                    ),
+                )
+
             tf_session_id = persisted["trueforge_session_id"]
 
         result = request_approval(
@@ -275,6 +284,8 @@ def request_containment_approval(
                 detail=result.get("error", "Request failed"),
             )
 
+        action_id = result["action_id"]
+
         tf_event = None
         tool_call_id = None
         thread_id = None
@@ -292,16 +303,22 @@ def request_containment_approval(
                         ]
                     },
                 )
+
                 tool_call_id = tf_event.get("tool_call_id")
                 thread_id = tf_event.get("thread_id")
 
             except RuntimeError as exc:
                 # Keep detailed exception context in server logs only.
-                print(f"TrueForge forward failed for session {local_session_id}: {exc}")
-                # Keep the local approval pending so the request can be retried.
+                print(
+                    f"TrueForge forward failed for session "
+                    f"{local_session_id}: {exc}"
+                )
+
+                # Keep the local approval pending so the same
+                # request can retry the TrueForge forward.
                 return {
                     "success": True,
-                    "action_id": result["action_id"],
+                    "action_id": action_id,
                     "session_id": local_session_id,
                     "trueforge_session_id": tf_session_id,
                     "tool_call_id": None,
@@ -313,21 +330,31 @@ def request_containment_approval(
                 }
 
         late_forward = None
+
         if tool_call_id:
             cas_result = set_approval_tool_call_id(
                 local_session_id,
-                result["action_id"],
+                action_id,
                 tool_call_id,
                 thread_id=thread_id,
             )
+
             if not cas_result.get("success"):
-                raise HTTPException(status_code=409, detail=cas_result.get("error", "Could not bind tool call"))
+                raise HTTPException(
+                    status_code=409,
+                    detail=cas_result.get(
+                        "error",
+                        "Could not bind tool call",
+                    ),
+                )
+
             if cas_result.get("pending_decision"):
                 late_forward = cas_result
 
         if late_forward and tf_session_id and tool_call_id:
             decision = late_forward["pending_decision"]
             decided_by = late_forward.get("decided_by", "analyst")
+
             approval_input = {
                 "type": "user.tool_approval",
                 "tool_call_id": tool_call_id,
@@ -340,6 +367,7 @@ def request_containment_approval(
                     }
                 ),
             }
+
             if thread_id:
                 approval_input["thread_id"] = thread_id
 
@@ -348,15 +376,17 @@ def request_containment_approval(
                     f"/api/v1/sessions/{tf_session_id}/turns",
                     {"input": [approval_input]},
                 )
+
             except RuntimeError as exc:
                 release_forwarding_claim(
                     local_session_id,
-                    result["action_id"],
+                    action_id,
                     str(exc),
                 )
+
                 return {
                     "success": True,
-                    "action_id": result["action_id"],
+                    "action_id": action_id,
                     "session_id": local_session_id,
                     "trueforge_session_id": tf_session_id,
                     "tool_call_id": tool_call_id,
@@ -369,7 +399,7 @@ def request_containment_approval(
 
         return {
             "success": True,
-            "action_id": result["action_id"],
+            "action_id": action_id,
             "session_id": local_session_id,
             "trueforge_session_id": tf_session_id,
             "tool_call_id": tool_call_id,
@@ -380,9 +410,12 @@ def request_containment_approval(
 
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Approval request failed: {exc}")
 
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Approval request failed: {exc}",
+        )
 
 def _forward_decision(
     tf_session_id: str,

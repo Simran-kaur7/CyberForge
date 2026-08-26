@@ -186,29 +186,67 @@ def find_session_by_incident(iid: str):
 # ---------------------------------------------------------------------------
 
 def request_approval(sid: str, atype: str, adetail: dict) -> dict:
-    """Request approval. Fails if one is already pending."""
+    """Request approval, reusing an existing compatible pending approval."""
     def _req(sessions):
         for s in sessions:
             if s["id"] != sid:
                 continue
-            # Bug #4: block if already pending
+
             existing = s.get("approval_state")
+
             if existing and existing.get("status") == "pending":
-                return {"success": False, "error": "An approval is already pending for this session"}
+                existing_detail = existing.get("action_detail") or {}
+
+                # A pending approval without a bound TrueForge tool call
+                # is retryable. Reuse it instead of creating a stranded
+                # second approval.
+                if (
+                    existing_detail.get("incident_id")
+                    == adetail.get("incident_id")
+                    and not existing.get("tool_call_id")
+                ):
+                    return {
+                        "success": True,
+                        "action_id": existing["action_id"],
+                        "status": "pending",
+                        "reused": True,
+                    }
+
+                return {
+                    "success": False,
+                    "error": "An approval is already pending for this session",
+                }
+
             aid = str(uuid.uuid4())[:8]
+            now = datetime.now(timezone.utc).isoformat()
+
             ap = {
-                "action_id": aid, "action_type": atype,
-                "action_detail": adetail, "status": "pending",
-                "requested_at": datetime.now(timezone.utc).isoformat(),
-                "decided_at": None, "decided_by": None,
+                "action_id": aid,
+                "action_type": atype,
+                "action_detail": adetail,
+                "status": "pending",
+                "requested_at": now,
+                "decided_at": None,
+                "decided_by": None,
             }
+
             s["approval_state"] = ap
             s["actions"].append(ap)
-            s["updated_at"] = datetime.now(timezone.utc).isoformat()
-            return {"success": True, "action_id": aid, "status": "pending"}
-        return {"success": False, "error": "Session not found"}
-    return _mutate_sessions(_req)
+            s["updated_at"] = now
 
+            return {
+                "success": True,
+                "action_id": aid,
+                "status": "pending",
+                "reused": False,
+            }
+
+        return {
+            "success": False,
+            "error": "Session not found",
+        }
+
+    return _mutate_sessions(_req)
 
 def _validate_decision_ids(
     session: dict,
@@ -276,11 +314,44 @@ def prepare_decision(
                 return {"success": False, "error": error}
 
             reservation = current.get("decision_in_progress")
+
             if reservation:
-                return {
-                    "success": False,
-                    "error": "A decision is already being forwarded",
-                }
+                started_at = reservation.get("started_at")
+                stale = False
+
+                if started_at:
+                    try:
+                        started = datetime.fromisoformat(
+                            started_at.replace("Z", "+00:00")
+                        )
+                        age_seconds = (
+                            datetime.now(timezone.utc) - started
+                        ).total_seconds()
+
+                        # A forwarding reservation older than 5 minutes
+                        # is considered abandoned and can be safely reclaimed.
+                        stale = age_seconds > 300
+
+                    except (TypeError, ValueError):
+                        # Invalid reservation timestamps are treated as stale
+                        # so corrupted state cannot permanently block decisions.
+                        stale = True
+                else:
+                    stale = True
+
+                if not stale:
+                    return {
+                        "success": False,
+                        "error": "A decision is already being forwarded",
+                    }
+
+                # Reclaim an abandoned reservation.
+                current.pop("decision_in_progress", None)
+
+                for action in s.get("actions", []):
+                    if action.get("action_id") == aid:
+                        action.pop("decision_in_progress", None)
+                        break
 
             token = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()
