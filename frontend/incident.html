@@ -106,10 +106,8 @@
 
     <div class="plate">
       <h2>Previously Investigated</h2>
-      <ul class="log-list">
-        <li><span>INC-1001</span><span class="status-resolved">RESOLVED</span><button class="reopen-btn" onclick="openIncident('INC-1001')">Reopen</button></li>
-        <li><span>INC-1002</span><span class="status-resolved">RESOLVED</span><button class="reopen-btn" onclick="openIncident('INC-1002')">Reopen</button></li>
-        <li><span>INC-1003</span><span class="status-resolved">RESOLVED</span><button class="reopen-btn" onclick="openIncident('INC-1003')">Reopen</button></li>
+      <ul class="log-list" id="prev-investigated">
+        <li><span class="evidence-placeholder">Loading…</span></li>
       </ul>
     </div>
 
@@ -120,6 +118,10 @@
 <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
 
 <script>
+  // ---- config ----
+  const API_BASE = window.location.protocol + '//' + window.location.hostname + ':' + (window.location.port || '8000');
+  const FORGE_URL = 'http://localhost:8790';
+
   // ---- read incident id from URL ----
   const params = new URLSearchParams(window.location.search);
   const incidentId = params.get('id') || 'INC-1024';
@@ -138,33 +140,34 @@
     setTimeout(() => el.remove(), 3500);
   }
 
-  // ---- backend investigation state ----
-  let investigationData = null;
-
+  // ---- risk scoring — matches agent/risk_score.py weights exactly ----
+  // failed_attempts(>=20): +20, suspicious_login: +25, suspicious_process: +25, unusual_connection: +20, known_bad_ip: +10
   function calculateRiskScore(data){
     const indicators = data?.analysis?.risk_indicators || {};
     let score = 0;
-
-    if ((indicators.failed_attempts || 0) >= 20) score += 35;
-    else if ((indicators.failed_attempts || 0) >= 10) score += 25;
-    else if ((indicators.failed_attempts || 0) > 0) score += 10;
-
+    if ((indicators.failed_attempts || 0) >= 20) score += 20;
     if (indicators.successful_suspicious_login) score += 25;
-    if (indicators.suspicious_process) score += 20;
+    if (indicators.suspicious_process) score += 25;
     if (indicators.unusual_connection) score += 20;
-
+    const sourceIp = data?.analysis?.source_ip || '';
+    if (sourceIp === '10.0.0.25') score += 10;
     return Math.min(score, 100);
   }
 
   function riskFromScore(score){
-    if (score >= 70) return 'high';
-    if (score >= 40) return 'medium';
+    if (score >= 80) return 'critical';
+    if (score >= 60) return 'high';
+    if (score >= 30) return 'medium';
     return 'low';
   }
 
   function riskLabelFromLevel(level){
-    return { high:'High Risk', medium:'Medium Risk', low:'Low Risk' }[level];
+    return { critical:'CRITICAL', high:'High Risk', medium:'Medium Risk', low:'Low Risk' }[level] || 'Unknown';
   }
+
+  // ---- backend investigation state ----
+  let investigationData = null;
+  let sessionId = null;
 
   function buildEvidence(data){
     const evidence = [];
@@ -182,18 +185,13 @@
 
     if ((auth.failed_logins || 0) > 0) {
       evidence.unshift({
-        tag:'[AUTH]',
-        level:'crit',
+        tag:'[AUTH]', level:'crit',
         text:`${auth.failed_logins} failed SSH logins associated with ${data?.analysis?.source_ip || 'the source IP'}`
       });
     }
 
     (activity.unusual_connections || []).forEach(connection => {
-      evidence.push({
-        tag:'[NET]',
-        level:'warn',
-        text:`Unusual network connection detected: ${connection}`
-      });
+      evidence.push({ tag:'[NET]', level:'warn', text:`Unusual network connection: ${connection}` });
     });
 
     return evidence;
@@ -203,251 +201,4 @@
     const indicators = data?.analysis?.risk_indicators || {};
     const failed = Math.min(100, Math.round((indicators.failed_attempts || 0) / 45 * 100));
     return [
-      { label:'Brute-force pattern match', weight:failed, level:failed >= 70 ? 'high' : '' },
-      { label:'Suspicious successful login', weight:indicators.successful_suspicious_login ? 90 : 10, level:indicators.successful_suspicious_login ? 'high' : 'low' },
-      { label:'Suspicious process signal', weight:indicators.suspicious_process ? 80 : 10, level:indicators.suspicious_process ? 'high' : 'low' },
-      { label:'Unusual network connection', weight:indicators.unusual_connection ? 75 : 10, level:indicators.unusual_connection ? '' : 'low' }
-    ];
-  }
-
-  const riskBadge = document.getElementById('header-risk-badge');
-  const investigateBtn = document.getElementById('investigate-button');
-  const evidencePanel = document.getElementById('evidence-panel');
-  const timeline = document.getElementById('timeline');
-  const gaugeArc = document.getElementById('gauge-arc');
-  const gaugeValue = document.getElementById('gauge-value');
-  const riskNote = document.getElementById('risk-note');
-  const explainList = document.getElementById('explain-list');
-  const approveBtn = document.getElementById('approve-button');
-  const rejectBtn = document.getElementById('reject-button');
-  const copyBtn = document.getElementById('copy-button');
-  const decisionResult = document.getElementById('decision-result');
-
-  const CIRC = 490;
-  let decision = null;
-
-  const steps = [
-    { id:'root', title:'Root Agent', desc:'Incident triaged, dispatching subagents' },
-    { id:'log',  title:'Log-Analysis Subagent', desc:'Correlating authentication and system logs' },
-    { id:'net',  title:'Network Subagent', desc:'Reviewing connection and traffic history' },
-    { id:'risk', title:'Risk Engine', desc:'Scoring severity from merged findings' },
-    { id:'gate', title:'Human Approval Gate', desc:'Awaiting analyst decision before any action' },
-  ];
-
-  function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
-
-  async function runInvestigation(){
-    if (investigateBtn.disabled) return;
-    investigateBtn.disabled = true;
-    investigateBtn.textContent = 'Investigating…';
-    toast(`Investigation started for ${incidentId}`, 'info');
-
-    evidencePanel.innerHTML = '<div class="skeleton-line"></div><div class="skeleton-line short"></div>';
-    timeline.innerHTML = '';
-    explainList.innerHTML = '';
-    decisionResult.className = 'decision-result';
-    decisionResult.textContent = '';
-    approveBtn.disabled = true; rejectBtn.disabled = true; copyBtn.disabled = true;
-
-    steps.forEach(s => {
-      const li = document.createElement('li');
-      li.id = `step-${s.id}`;
-      li.innerHTML = `<div class="t-title">${s.title}</div><div class="t-desc">${s.desc}</div>`;
-      timeline.appendChild(li);
-    });
-
-    try {
-      const response = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}/investigate`);
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.detail || 'Investigation request failed');
-      }
-
-      investigationData = data;
-
-      const score = calculateRiskScore(data);
-      const risk = riskFromScore(score);
-      const riskClass = { high:'risk-high', medium:'risk-medium', low:'risk-low' }[risk];
-      const riskLabel = riskLabelFromLevel(risk);
-      const sourceIp = data.analysis?.source_ip || '—';
-      const evidence = buildEvidence(data);
-      const explain = buildExplain(data, score);
-
-      document.getElementById('stat-source').textContent = sourceIp;
-      document.getElementById('stat-host').textContent = '—';
-      document.getElementById('stat-seen').textContent = 'Just now';
-
-      let firstLine = true;
-
-      for (let i = 0; i < steps.length - 1; i++) {
-        const li = document.getElementById(`step-${steps[i].id}`);
-        li.classList.add('active');
-        await sleep(500);
-        li.classList.remove('active');
-        li.classList.add('done');
-
-        if (steps[i].id === 'log' || steps[i].id === 'net') {
-          const line = evidence.shift();
-          if (line) {
-            if (firstLine) {
-              evidencePanel.innerHTML = '';
-              firstLine = false;
-            }
-            appendEvidence(line);
-          }
-        }
-      }
-
-      if (firstLine) evidencePanel.innerHTML = '';
-      evidence.forEach(appendEvidence);
-
-      riskBadge.textContent = riskLabel;
-      riskBadge.className = `risk-badge ${riskClass}`;
-      gaugeArc.style.stroke =
-        risk === 'high' ? 'var(--ember-red)' :
-        risk === 'medium' ? 'var(--ember)' : 'var(--spark)';
-
-      const offset = CIRC - (CIRC * score / 100);
-      requestAnimationFrame(() => { gaugeArc.style.strokeDashoffset = offset; });
-      gaugeValue.textContent = score;
-
-      const findings = data.analysis?.findings || [];
-      riskNote.textContent = findings.length
-        ? findings.join(' ')
-        : 'Investigation completed with no additional findings.';
-
-      explain.forEach((f, idx) => {
-        const li = document.createElement('li');
-        li.className = 'explain-item';
-        li.innerHTML = `
-          <div class="explain-item-head"><span>${f.label}</span><span>${f.weight}%</span></div>
-          <div class="explain-bar-track"><div class="explain-bar-fill ${f.level}" id="ebar-${idx}"></div></div>`;
-        explainList.appendChild(li);
-        requestAnimationFrame(() => {
-          setTimeout(() => {
-            document.getElementById(`ebar-${idx}`).style.width = f.weight + '%';
-          }, 60 * idx);
-        });
-      });
-
-      document.getElementById('step-gate').classList.add('active');
-
-      investigateBtn.textContent = 'Investigation Complete';
-      approveBtn.disabled = false;
-      rejectBtn.disabled = false;
-      toast('Investigation complete — awaiting your decision', 'success');
-    } catch (error) {
-      investigateBtn.disabled = false;
-      investigateBtn.textContent = 'Investigate Incident';
-      evidencePanel.innerHTML = '<p class="evidence-placeholder">Investigation could not be completed.</p>';
-      toast(error.message || 'Investigation failed', 'error');
-    }
-  }
-
-  function appendEvidence(line){
-    const div = document.createElement('div');
-    div.className = 'log-line';
-    div.innerHTML = `<span class="tag ${line.level}">${line.tag}</span><span>${line.text}</span>`;
-    evidencePanel.appendChild(div);
-  }
-
-  investigateBtn.addEventListener('click', runInvestigation);
-
-  approveBtn.addEventListener('click', () => {
-    document.getElementById('step-gate').classList.remove('active');
-    document.getElementById('step-gate').classList.add('done');
-    decisionResult.className = 'decision-result approved';
-    decisionResult.textContent = `Approved · response action logged for ${incidentId} · source blocked pending execution`;
-    approveBtn.disabled = true; rejectBtn.disabled = true; copyBtn.disabled = false;
-    decision = 'approved';
-    toast('Response approved and logged to audit trail', 'success');
-  });
-
-  rejectBtn.addEventListener('click', () => {
-    document.getElementById('step-gate').classList.remove('active');
-    document.getElementById('step-gate').classList.add('done');
-    decisionResult.className = 'decision-result rejected';
-    decisionResult.textContent = `Rejected · no action taken for ${incidentId} · decision logged to audit trail`;
-    approveBtn.disabled = true; rejectBtn.disabled = true; copyBtn.disabled = false;
-    decision = 'rejected';
-    toast('Decision logged — no action taken', 'info');
-  });
-
-  copyBtn.addEventListener('click', async () => {
-    const riskScore = investigationData ? calculateRiskScore(investigationData) : null;
-    const riskLevel = riskScore === null ? null : riskFromScore(riskScore);
-    const summary = {
-      incident: incidentId,
-      risk_score: riskScore,
-      risk_level: riskLevel,
-      source_ip: investigationData?.analysis?.source_ip || null,
-      affected_host: null,
-      decision: decision,
-      timestamp: new Date().toISOString()
-    };
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(summary, null, 2));
-      toast('Audit summary copied to clipboard', 'success');
-    } catch {
-      toast('Could not access clipboard', 'error');
-    }
-  });
-
-  // ---- keyboard shortcut: "I" to investigate ----
-  window.addEventListener('keydown', (e) => {
-    if ((e.key === 'i' || e.key === 'I') && !investigateBtn.disabled && document.activeElement.tagName !== 'INPUT') {
-      runInvestigation();
-    }
-  });
-
-  // ---- custom reticle cursor ----
-  const reticle = document.getElementById('reticle');
-  const isCoarse = window.matchMedia('(pointer: coarse)').matches;
-  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  if (!isCoarse) {
-    let mx=0,my=0,cx=0,cy=0;
-    window.addEventListener('mousemove', e=>{ mx=e.clientX; my=e.clientY; });
-    function loop(){ cx += (mx-cx)*0.22; cy += (my-cy)*0.22; reticle.style.transform = `translate(${cx}px,${cy}px)`; requestAnimationFrame(loop); }
-    loop();
-    function bindReticle(){
-      document.querySelectorAll('button, a, .plate').forEach(el=>{
-        el.addEventListener('mouseenter', ()=>{
-          reticle.classList.add('active');
-          if (el.id === 'reject-button') reticle.classList.add('risk');
-          if (el.id === 'approve-button') reticle.classList.add('ok');
-        });
-        el.addEventListener('mouseleave', ()=> reticle.classList.remove('active','risk','ok'));
-      });
-    }
-    bindReticle();
-  }
-
-  // ---- ambient ember particles ----
-  const canvas = document.getElementById('emberCanvas');
-  const ctx = canvas.getContext('2d');
-  let w,h,embers=[];
-  function resize(){ w=canvas.width=window.innerWidth; h=canvas.height=window.innerHeight; }
-  resize(); window.addEventListener('resize', resize);
-  function makeEmber(){ return { x:Math.random()*w, y:h+20, r:Math.random()*1.6+0.4, sp:Math.random()*0.5+0.15, drift:(Math.random()-0.5)*0.4, a:Math.random()*0.5+0.2 }; }
-  const count = reduceMotion ? 0 : 46;
-  for (let i=0;i<count;i++) embers.push(makeEmber());
-  function draw(){
-    ctx.clearRect(0,0,w,h);
-    embers.forEach(p=>{
-      p.y -= p.sp; p.x += p.drift;
-      if (p.y < -20) { Object.assign(p, makeEmber()); p.y = h+10; }
-      ctx.beginPath();
-      ctx.fillStyle = `rgba(255,138,61,${p.a})`;
-      ctx.shadowColor = 'rgba(255,138,61,0.8)';
-      ctx.shadowBlur = 4;
-      ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
-      ctx.fill();
-    });
-    if (count>0) requestAnimationFrame(draw);
-  }
-  draw();
-</script>
-
-</body>
-</html>
+      { label:'Brute-

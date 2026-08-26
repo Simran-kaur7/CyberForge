@@ -55,56 +55,15 @@
     </div>
 
     <div class="incident-grid" id="incident-grid" aria-live="polite">
-
-      <div class="tilt-card" data-id="INC-1024" data-desc="Suspicious SSH Activity" data-risk="high" data-risk-num="3" data-minutes="4">
-        <div class="eyebrow">Active Incident</div>
-        <div class="inc-id">INC-1024</div>
-        <p class="inc-desc">Suspicious SSH Activity</p>
-        <div class="row">
-          <span class="risk-badge risk-high">High Risk</span>
-          <span class="meta">detected 4m ago</span>
-        </div>
-        <button class="btn btn-open" onclick="openIncident('INC-1024')">
-          Open Incident <span aria-hidden="true">→</span>
-        </button>
       </div>
-
-      <div class="tilt-card" data-id="INC-1025" data-desc="Unusual Network Activity" data-risk="medium" data-risk-num="2" data-minutes="21">
-        <div class="eyebrow">Active Incident</div>
-        <div class="inc-id">INC-1025</div>
-        <p class="inc-desc">Unusual Network Activity</p>
-        <div class="row">
-          <span class="risk-badge risk-medium">Medium Risk</span>
-          <span class="meta">detected 21m ago</span>
-        </div>
-        <button class="btn btn-open" onclick="openIncident('INC-1025')">
-          Open Incident <span aria-hidden="true">→</span>
-        </button>
-      </div>
-
-    </div>
     <div class="empty-state" id="empty-state" style="display:none;">No incidents match your search.</div>
   </section>
 
   <section id="resolved">
     <div class="section-head"><h2>Previously Investigated</h2><span class="count">3 resolved</span></div>
-    <ul class="log-list">
-      <li>
-        <span class="id">INC-1001</span>
-        <span class="status-resolved">RESOLVED</span>
-        <button class="reopen-btn" onclick="openIncident('INC-1001')">Reopen</button>
-      </li>
-      <li>
-        <span class="id">INC-1002</span>
-        <span class="status-resolved">RESOLVED</span>
-        <button class="reopen-btn" onclick="openIncident('INC-1002')">Reopen</button>
-      </li>
-      <li>
-        <span class="id">INC-1003</span>
-        <span class="status-resolved">RESOLVED</span>
-        <button class="reopen-btn" onclick="openIncident('INC-1003')">Reopen</button>
-      </li>
-    </ul>
+    <ul class="log-list" id="resolved-list">
+        <li><span class="evidence-placeholder">Loading…</span></li>
+      </ul>
   </section>
 
 </main>
@@ -221,6 +180,35 @@
     if (count>0) requestAnimationFrame(draw);
   }
   draw();
+
+
+  // ---- load incidents from TrueForge sessions ----
+  const FORGE_URL = 'http://localhost:8790';
+  async function loadSessions(){
+    const grid = document.getElementById('incident-grid');
+    const resolvedList = document.getElementById('resolved-list');
+    try {
+      const resp = await fetch(FORGE_URL + '/api/v1/sessions');
+      const data = await resp.json();
+      const sessions = data?.data || data || [];
+      if (!Array.isArray(sessions) || sessions.length === 0) {
+        grid.innerHTML = '<div class="empty-state" id="empty-state">No active incidents. Start an investigation from the agent.</div>';
+        return;
+      }
+      const active = sessions.filter(s => s.state?.status !== 'resolved');
+      const resolved = sessions.filter(s => s.state?.status === 'resolved');
+      grid.innerHTML = active.length ? active.map(s => {
+        const risk = s.state?.risk_level || 'medium';
+        return '<div class="tilt-card" data-id="' + s.id + '"><div class="eyebrow">Active Incident</div><div class="inc-id">' + (s.title || s.id) + '</div><div class="row"><span class="risk-badge risk-' + risk + '">' + risk + '</span></div><button class="btn btn-open" onclick="openIncident('' + s.id + '')">Open Incident →</button></div>';
+      }).join('') : '<div class="empty-state">No active incidents.</div>';
+      resolvedList.innerHTML = resolved.length ? resolved.map(s =>
+        '<li><span>' + (s.title || s.id) + '</span><span class="status-resolved">RESOLVED</span><button class="reopen-btn" onclick="openIncident('' + s.id + '')">Reopen</button></li>'
+      ).join('') : '<li><span class="evidence-placeholder">No resolved incidents</span></li>';
+    } catch {
+      grid.innerHTML = '<div class="empty-state">Connect to TrueForge to see live incidents.</div>';
+    }
+  }
+  loadSessions();
 
   // welcome toast
   window.addEventListener('load', () => toast('2 active incidents awaiting investigation', 'info'));
