@@ -186,7 +186,7 @@ def find_session_by_incident(iid: str):
 # ---------------------------------------------------------------------------
 
 def request_approval(sid: str, atype: str, adetail: dict) -> dict:
-    """Request approval, reusing an existing compatible pending approval."""
+    """Request approval, reusing an existing compatible pending approval and claiming forward atomically."""
     def _req(sessions):
         for s in sessions:
             if s["id"] != sid:
@@ -197,14 +197,28 @@ def request_approval(sid: str, atype: str, adetail: dict) -> dict:
             if existing and existing.get("status") == "pending":
                 existing_detail = existing.get("action_detail") or {}
 
-                # A pending approval without a bound TrueForge tool call
-                # is retryable. Reuse it instead of creating a stranded
-                # second approval.
                 if (
                     existing_detail.get("incident_id")
                     == adetail.get("incident_id")
                     and not existing.get("tool_call_id")
                 ):
+                    # Check if another concurrent request is actively forwarding to TrueForge
+                    if existing.get("request_in_flight"):
+                        return {
+                            "success": False,
+                            "error": "A request to TrueForge is already in flight for this approval action",
+                            "in_flight": True,
+                        }
+
+                    # Atomically claim the request forward
+                    existing["request_in_flight"] = True
+                    for action in s.get("actions", []):
+                        if action.get("action_id") == existing["action_id"]:
+                            action["request_in_flight"] = True
+                            break
+
+                    s["updated_at"] = datetime.now(timezone.utc).isoformat()
+
                     return {
                         "success": True,
                         "action_id": existing["action_id"],
@@ -228,6 +242,7 @@ def request_approval(sid: str, atype: str, adetail: dict) -> dict:
                 "requested_at": now,
                 "decided_at": None,
                 "decided_by": None,
+                "request_in_flight": True,  # Claim initial forward
             }
 
             s["approval_state"] = ap
@@ -247,6 +262,31 @@ def request_approval(sid: str, atype: str, adetail: dict) -> dict:
         }
 
     return _mutate_sessions(_req)
+
+
+def release_request_claim(sid: str, action_id: str) -> dict:
+    """Release the in-flight claim on a request forward if TrueForge call fails."""
+    def _release(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+
+            ap = s.get("approval_state")
+            if ap and ap.get("action_id") == action_id:
+                ap["request_in_flight"] = False
+
+            for action in s.get("actions", []):
+                if action.get("action_id") == action_id:
+                    action["request_in_flight"] = False
+                    break
+
+            s["updated_at"] = datetime.now(timezone.utc).isoformat()
+            return {"success": True, "action_id": action_id}
+
+        return {"success": False, "error": "Session not found"}
+
+    return _mutate_sessions(_release)
+
 
 def _validate_decision_ids(
     session: dict,
@@ -316,6 +356,18 @@ def prepare_decision(
             reservation = current.get("decision_in_progress")
 
             if reservation:
+                original_decision = reservation.get("decision")
+
+                # FIX FOR ISSUE #2: A reclaimed reservation MUST NOT change the original decision
+                if decision != original_decision:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"A decision forward for '{original_decision}' is already in progress or abandoned; "
+                            f"cannot change decision to '{decision}'"
+                        ),
+                    }
+
                 started_at = reservation.get("started_at")
                 stale = False
 
@@ -345,7 +397,7 @@ def prepare_decision(
                         "error": "A decision is already being forwarded",
                     }
 
-                # Reclaim an abandoned reservation.
+                # Reclaim an abandoned reservation preserving original decision
                 current.pop("decision_in_progress", None)
 
                 for action in s.get("actions", []):
@@ -577,7 +629,7 @@ def set_approval_tool_call_id(
     tool_call_id: str,
     thread_id: str | None = None,
 ) -> dict:
-    """Atomically bind the TrueForge call/thread to a local approval action."""
+    """Atomically bind the TrueForge call/thread to a local approval action and clear request claim."""
     def _set(sessions):
         for s in sessions:
             if s["id"] != sid:
@@ -598,19 +650,20 @@ def set_approval_tool_call_id(
                 return {"success": False, "error": "Action not found"}
 
             target["tool_call_id"] = tool_call_id
+            target["request_in_flight"] = False  # Unset claim upon binding
             if thread_id:
                 target["thread_id"] = thread_id
 
-            # Keep the top-level approval state and action history synchronized
-            # after JSON reload, where they are separate dictionaries.
             if ap and ap.get("action_id") == action_id and target is not ap:
                 ap["tool_call_id"] = tool_call_id
+                ap["request_in_flight"] = False
                 if thread_id:
                     ap["thread_id"] = thread_id
 
             for action in s.get("actions", []):
                 if action.get("action_id") == action_id and action is not target:
                     action["tool_call_id"] = tool_call_id
+                    action["request_in_flight"] = False
                     if thread_id:
                         action["thread_id"] = thread_id
                     target = action if target is None else target
@@ -659,18 +712,13 @@ def release_forwarding_claim(sid: str, action_id: str, error: str) -> dict:
     return _mutate_sessions(_release)
 
 def persist_trueforge_session_id(sid: str, tf_session_id: str) -> dict:
-    """Atomically persist a TrueForge session ID on the local session.
-
-    Uses compare-and-set: only writes if the current value is still None.
-    Returns the winning ID so callers can reuse it if another request won.
-    """
+    """Atomically persist a TrueForge session ID on the local session."""
     def _persist(sessions):
         for s in sessions:
             if s["id"] != sid:
                 continue
             existing = s.get("trueforge_session_id")
             if existing:
-                # Another request already set it — return the winner
                 return {"success": True, "trueforge_session_id": existing, "reused": True}
             s["trueforge_session_id"] = tf_session_id
             s["updated_at"] = datetime.now(timezone.utc).isoformat()

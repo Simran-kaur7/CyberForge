@@ -226,6 +226,7 @@ def request_containment_approval(
             set_approval_tool_call_id,
             persist_trueforge_session_id,
             release_forwarding_claim,
+            release_request_claim,
         )
 
         session = get_session(body.session_id)
@@ -308,6 +309,9 @@ def request_containment_approval(
                 thread_id = tf_event.get("thread_id")
 
             except RuntimeError as exc:
+                # Release request claim upon failure so concurrent retries can run
+                release_request_claim(local_session_id, action_id)
+
                 # Keep detailed exception context in server logs only.
                 print(
                     f"TrueForge forward failed for session "
@@ -416,6 +420,7 @@ def request_containment_approval(
             status_code=500,
             detail=f"Approval request failed: {exc}",
         )
+
 
 def _forward_decision(
     tf_session_id: str,
