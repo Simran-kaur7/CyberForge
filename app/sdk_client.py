@@ -148,6 +148,7 @@ def create_session(incident_id: str, evidence_snapshot=None) -> dict:
             "created_at": now, "updated_at": now,
             "evidence_snapshot": evidence_snapshot or {},
             "risk_score": None, "approval_state": None,
+            "trueforge_session_id": None,
             "actions": [], "findings": [],
         }
         sessions.append(s)
@@ -169,6 +170,7 @@ def list_sessions() -> list:
             "status": s["status"], "created_at": s["created_at"],
             "risk_score": s.get("risk_score"),
             "approval_state": s.get("approval_state"),
+            "trueforge_session_id": s.get("trueforge_session_id"),
         }
         for s in _load_sessions()
     ]

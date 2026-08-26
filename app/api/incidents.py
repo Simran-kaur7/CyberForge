@@ -72,18 +72,49 @@ def investigate_incident(incident_id: str):
             detail="Security investigation tool failed.",
         ) from exc
 
-    # Create or reuse a session for this incident
+    # Create or reuse a local session for this incident
     existing = find_session_by_incident(incident_id)
     if existing:
-        session_id = existing["id"]
+        local_session = existing
     else:
-        session = create_session(incident_id, evidence_snapshot=analysis)
-        session_id = session["id"]
+        local_session = create_session(incident_id, evidence_snapshot=analysis)
+
+    local_session_id = local_session["id"]
+
+    # Optionally create a TrueForge session and store its ID
+    trueforge_session_id = None
+    try:
+        import os
+        import json as _json
+        import urllib.request as _req
+        tf_url = os.environ.get("TRUEFORGE_URL", "http://localhost:8790")
+        payload = _json.dumps({
+            "title": f"Investigation: {incident_id}",
+            "metadata": {"incident_id": incident_id, "local_session_id": local_session_id},
+        }).encode()
+        r = _req.urlopen(
+            _req.Request(
+                f"{tf_url}/api/v1/sessions",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            ),
+            timeout=10,
+        )
+        tf_resp = _json.loads(r.read().decode())
+        trueforge_session_id = tf_resp.get("id") or tf_resp.get("data", {}).get("id")
+        # Persist the TrueForge session ID back to our local session
+        if trueforge_session_id:
+            from app.sdk_client import update_session
+            update_session(local_session_id, trueforge_session_id=trueforge_session_id)
+    except Exception:
+        pass  # TrueForge unavailable, local-only mode
 
     return {
         "success": True,
         "incident_id": incident_id,
-        "session_id": session_id,
+        "session_id": local_session_id,
+        "trueforge_session_id": trueforge_session_id,
         "analysis": analysis,
         "authentication": logs,
         "system_activity": activity,

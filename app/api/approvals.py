@@ -23,14 +23,17 @@ EXPECTED_API_KEY = os.environ.get("CYBERFORGE_API_KEY", "")
 
 
 class ApprovalRequest(BaseModel):
-    session_id: str
+    session_id: str  # CyberForge local session ID
+    trueforge_session_id: Optional[str] = None  # TrueForge session ID (if known)
     message: str = "Investigate and contain the incident"
     thread_id: Optional[str] = None
 
 
 class DecisionRequest(BaseModel):
-    session_id: str
-    action_id: str
+    session_id: str  # CyberForge local session ID
+    action_id: str  # CyberForge local action ID
+    tool_call_id: Optional[str] = None  # TrueForge tool_call_id (if known)
+    trueforge_session_id: Optional[str] = None  # TrueForge session ID (if known)
     thread_id: Optional[str] = None
     reason: Optional[str] = None
 
@@ -129,29 +132,56 @@ def request_containment_approval(
     analyst = _require_api_key(authorization)
     try:
         from app.sdk_client import request_approval, get_session
+
+        # Resolve IDs: local for CyberForge, TrueForge for upstream
         session = get_session(body.session_id)
-        actual_incident_id = session["incident_id"] if session else body.session_id
+        local_session_id = body.session_id
+        tf_session_id = body.trueforge_session_id
+        if not tf_session_id and session:
+            tf_session_id = session.get("trueforge_session_id")
+
+        actual_incident_id = session["incident_id"] if session else local_session_id
         result = request_approval(
-            body.session_id, "block_ip",
-            {"incident_id": actual_incident_id, "message": body.message}
+            local_session_id, "block_ip",
+            {
+                "incident_id": actual_incident_id,
+                "message": body.message,
+                "trueforge_session_id": tf_session_id,
+            }
         )
         if not result.get("success"):
             raise HTTPException(status_code=409, detail=result.get("error", "Request failed"))
 
-        # Optionally forward to TrueForge
+        # Forward to TrueForge using the TRUEFORGE session ID (not local)
         tf_event = None
-        try:
-            tf_event = _tf_post_sse(
-                f"/api/v1/sessions/{body.session_id}/turns",
-                {"input": [{"type": "user.message", "content": body.message}]},
-            )
-        except RuntimeError:
-            pass  # TrueForge unavailable, local state is sufficient
+        tool_call_id = None
+        if tf_session_id:
+            try:
+                tf_event = _tf_post_sse(
+                    f"/api/v1/sessions/{tf_session_id}/turns",
+                    {"input": [{"type": "user.message", "content": body.message}]},
+                )
+                tool_call_id = tf_event.get("tool_call_id") or tf_event.get("tool_call", {}).get("id")
+            except RuntimeError:
+                pass  # TrueForge unavailable
+
+        # Persist tool_call_id in local session's approval state
+        if tool_call_id:
+            try:
+                from app.sdk_client import update_session, get_session
+                sess = get_session(local_session_id)
+                if sess and sess.get("approval_state"):
+                    sess["approval_state"]["tool_call_id"] = tool_call_id
+                    update_session(local_session_id, approval_state=sess["approval_state"])
+            except Exception:
+                pass
 
         return {
             "success": True,
             "action_id": result["action_id"],
-            "session_id": body.session_id,
+            "session_id": local_session_id,
+            "trueforge_session_id": tf_session_id,
+            "tool_call_id": tool_call_id,
             "analyst": analyst,
             "trueforge_event": tf_event,
         }
@@ -169,27 +199,41 @@ def approve_containment(
     """Approve a pending tool call via local SDK + optional TrueForge."""
     analyst = _require_api_key(authorization)
     try:
-        from app.sdk_client import approve_action
+        from app.sdk_client import approve_action, get_session
+
+        # Local approval: use CyberForge action_id + session_id
         result = approve_action(body.session_id, body.action_id, analyst)
         if not result.get("success"):
             raise HTTPException(status_code=409, detail=result.get("error", "Approval failed"))
 
-        # Optionally forward to TrueForge
+        # TrueForge approval: use tool_call_id + trueforge_session_id
         tf_event = None
-        try:
-            approval_input = {
-                "type": "user.tool_approval",
-                "tool_call_id": body.action_id,
-                "approval": {"status": "allow"},
-            }
-            if body.thread_id:
-                approval_input["thread_id"] = body.thread_id
-            tf_event = _tf_post_sse(
-                f"/api/v1/sessions/{body.session_id}/turns",
-                {"input": [approval_input]},
-            )
-        except RuntimeError:
-            pass
+        tf_session_id = body.trueforge_session_id
+        tf_tool_call_id = body.tool_call_id
+        if not tf_session_id:
+            session = get_session(body.session_id)
+            if session:
+                tf_session_id = session.get("trueforge_session_id")
+        if not tf_tool_call_id:
+            session = get_session(body.session_id)
+            if session and session.get("approval_state"):
+                tf_tool_call_id = session["approval_state"].get("tool_call_id")
+
+        if tf_session_id and tf_tool_call_id:
+            try:
+                approval_input = {
+                    "type": "user.tool_approval",
+                    "tool_call_id": tf_tool_call_id,
+                    "approval": {"status": "allow"},
+                }
+                if body.thread_id:
+                    approval_input["thread_id"] = body.thread_id
+                tf_event = _tf_post_sse(
+                    f"/api/v1/sessions/{tf_session_id}/turns",
+                    {"input": [approval_input]},
+                )
+            except RuntimeError:
+                pass
 
         return {
             "success": True, "action_id": body.action_id,
@@ -210,28 +254,42 @@ def reject_containment(
     """Reject a pending tool call via local SDK + optional TrueForge."""
     analyst = _require_api_key(authorization)
     try:
-        from app.sdk_client import reject_action
+        from app.sdk_client import reject_action, get_session
+
+        # Local rejection: use CyberForge action_id + session_id
         result = reject_action(body.session_id, body.action_id, analyst)
         if not result.get("success"):
             raise HTTPException(status_code=409, detail=result.get("error", "Rejection failed"))
 
-        # Optionally forward to TrueForge
+        # TrueForge rejection: use tool_call_id + trueforge_session_id
         tf_event = None
-        try:
-            reason = body.reason or f"Rejected by {analyst}"
-            approval_input = {
-                "type": "user.tool_approval",
-                "tool_call_id": body.action_id,
-                "approval": {"status": "deny", "reason": reason},
-            }
-            if body.thread_id:
-                approval_input["thread_id"] = body.thread_id
-            tf_event = _tf_post_sse(
-                f"/api/v1/sessions/{body.session_id}/turns",
-                {"input": [approval_input]},
-            )
-        except RuntimeError:
-            pass
+        tf_session_id = body.trueforge_session_id
+        tf_tool_call_id = body.tool_call_id
+        if not tf_session_id:
+            session = get_session(body.session_id)
+            if session:
+                tf_session_id = session.get("trueforge_session_id")
+        if not tf_tool_call_id:
+            session = get_session(body.session_id)
+            if session and session.get("approval_state"):
+                tf_tool_call_id = session["approval_state"].get("tool_call_id")
+
+        if tf_session_id and tf_tool_call_id:
+            try:
+                reason = body.reason or f"Rejected by {analyst}"
+                approval_input = {
+                    "type": "user.tool_approval",
+                    "tool_call_id": tf_tool_call_id,
+                    "approval": {"status": "deny", "reason": reason},
+                }
+                if body.thread_id:
+                    approval_input["thread_id"] = body.thread_id
+                tf_event = _tf_post_sse(
+                    f"/api/v1/sessions/{tf_session_id}/turns",
+                    {"input": [approval_input]},
+                )
+            except RuntimeError:
+                pass
 
         return {
             "success": True, "action_id": body.action_id,

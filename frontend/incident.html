@@ -177,6 +177,7 @@
   // ============================================================
   var investigationData = null;
   var sessionId = null;
+  var trueforgeSessionId = null;
   var investigationInProgress = false;
 
   // ============================================================
@@ -377,6 +378,7 @@
       .then(function (data) {
         investigationData = data;
         sessionId = data.session_id || null;
+        trueforgeSessionId = data.trueforge_session_id || null;
 
         // Step through timeline
         renderTimeline(1);
@@ -432,6 +434,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             session_id: sessionId || 'demo-session',
+            trueforge_session_id: trueforgeSessionId,
             message: 'Investigate and contain ' + incidentId
           })
         })
@@ -440,10 +443,11 @@
           return r.json();
         })
         .then(function (res) {
-          // Preserve both IDs: local action_id for SDK, tool_call_id for TrueForge
+          // Preserve all IDs: local action_id for CyberForge, tool_call_id for TrueForge
           pendingLocalActionId = res.action_id || null;
-          var event = res.trueforge_event || {};
-          pendingToolCallId = event.tool_call_id || event.tool_call?.id || null;
+          pendingToolCallId = res.tool_call_id || null;
+          // Update trueforgeSessionId if the backend resolved a new one
+          if (res.trueforge_session_id) trueforgeSessionId = res.trueforge_session_id;
           return pendingLocalActionId || incidentId;
         })
         .catch(function () {
@@ -455,9 +459,10 @@
       var body = {
         session_id: sessionId || 'demo-session',
         action_id: localActionId,
+        trueforge_session_id: trueforgeSessionId,
+        tool_call_id: pendingToolCallId,
         decided_by: 'analyst',
-        thread_id: null,
-        tool_call_id: pendingToolCallId
+        thread_id: null
       };
 
       return fetch(url, {
