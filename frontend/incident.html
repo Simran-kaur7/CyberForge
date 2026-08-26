@@ -119,10 +119,9 @@
 
 <script>
   // ============================================================
-  //  CONFIG
+  //  CONFIG — use relative URLs since FastAPI serves both static and API
   // ============================================================
-  const API_BASE = window.location.protocol + '//' + window.location.hostname + ':' + (window.location.port || '8000');
-  const FORGE_URL = 'http://localhost:8790';
+  const API_BASE = '';
 
   // ============================================================
   //  READ INCIDENT ID FROM URL
@@ -178,6 +177,7 @@
   // ============================================================
   var investigationData = null;
   var sessionId = null;
+  var investigationInProgress = false;
 
   // ============================================================
   //  BUILD EVIDENCE LINES
@@ -309,11 +309,20 @@
       var tagClass = 'tag';
       if (item.level === 'crit') tagClass += ' crit';
       else if (item.level === 'warn') tagClass += ' warn';
-      div.innerHTML = '<span class="' + tagClass + '">' + item.tag + '</span><span>' + item.text + '</span>';
+      var tagSpan = document.createElement('span');
+      tagSpan.className = tagClass;
+      tagSpan.textContent = item.tag;
+      var textSpan = document.createElement('span');
+      textSpan.textContent = item.text;
+      div.appendChild(tagSpan);
+      div.appendChild(textSpan);
       panel.appendChild(div);
     });
     if (items.length === 0) {
-      panel.innerHTML = '<p class="evidence-placeholder">No evidence found.</p>';
+      var p = document.createElement('p');
+      p.className = 'evidence-placeholder';
+      p.textContent = 'No evidence found.';
+      panel.appendChild(p);
     }
   }
 
@@ -350,6 +359,8 @@
   //  INVESTIGATE
   // ============================================================
   function runInvestigation() {
+    if (investigationInProgress) return;
+    investigationInProgress = true;
     var btn = document.getElementById('investigate-button');
     btn.disabled = true;
     btn.textContent = 'Investigating\u2026';
@@ -396,6 +407,7 @@
         toast('Investigation failed: ' + err.message, 'error');
         btn.disabled = false;
         btn.textContent = 'Investigate Incident';
+        investigationInProgress = false;
         renderTimeline(-1);
       });
   }
@@ -422,11 +434,17 @@
             message: 'Investigate and contain ' + incidentId
           })
         })
-        .then(function (r) { return r.json(); })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
         .then(function (res) {
-          if (res.action_id) {
-            pendingActionId = res.action_id;
-            return res.action_id;
+          // Extract tool_call_id from TrueForge event if available
+          var event = res.trueforge_event || {};
+          var toolCallId = event.tool_call_id || event.tool_call?.id || res.action_id || null;
+          if (toolCallId) {
+            pendingActionId = toolCallId;
+            return toolCallId;
           }
           // TrueForge not running — use incident ID as demo fallback
           return incidentId;
@@ -449,8 +467,12 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       })
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
       .then(function (res) {
+        if (!res.success) throw new Error(res.error || 'Decision failed');
         var resultEl = document.getElementById('decision-result');
         if (decision === 'approve') {
           resultEl.className = 'decision-result approved';
@@ -624,7 +646,9 @@
   document.addEventListener('keydown', function (e) {
     if (e.key === 'i' || e.key === 'I') {
       if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
-      runInvestigation();
+      if (!document.getElementById('investigate-button').disabled) {
+        runInvestigation();
+      }
     }
   });
 

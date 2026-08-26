@@ -122,23 +122,41 @@ def request_containment_approval(
     authorization: Optional[str] = Header(None),
 ):
     """
-    Start an agent turn. TrueForge pauses on block_ip approval gate
-    and emits tool.approval_required in the SSE stream.
+    Request human approval for a containment action.
+    Uses local SDK state machine as primary store.
+    Optionally forwards to TrueForge if available.
     """
     analyst = _require_api_key(authorization)
     try:
-        result = _tf_post_sse(
-            f"/api/v1/sessions/{body.session_id}/turns",
-            {"input": [{"type": "user.message", "content": body.message}]},
+        from app.sdk_client import request_approval
+        result = request_approval(
+            body.session_id, "block_ip",
+            {"incident_id": body.session_id, "message": body.message}
         )
+        if not result.get("success"):
+            raise HTTPException(status_code=409, detail=result.get("error", "Request failed"))
+
+        # Optionally forward to TrueForge
+        tf_event = None
+        try:
+            tf_event = _tf_post_sse(
+                f"/api/v1/sessions/{body.session_id}/turns",
+                {"input": [{"type": "user.message", "content": body.message}]},
+            )
+        except RuntimeError:
+            pass  # TrueForge unavailable, local state is sufficient
+
         return {
             "success": True,
+            "action_id": result["action_id"],
             "session_id": body.session_id,
             "analyst": analyst,
-            "trueforge_event": result,
+            "trueforge_event": tf_event,
         }
-    except RuntimeError:
-        raise HTTPException(status_code=502, detail="TrueForge unavailable")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Approval request failed")
 
 
 @router.post("/approve")
@@ -146,23 +164,40 @@ def approve_containment(
     body: DecisionRequest,
     authorization: Optional[str] = Header(None),
 ):
-    """Approve a pending tool call. Consumes SSE response."""
+    """Approve a pending tool call via local SDK + optional TrueForge."""
     analyst = _require_api_key(authorization)
-    approval_input = {
-        "type": "user.tool_approval",
-        "tool_call_id": body.action_id,
-        "approval": {"status": "allow"},
-    }
-    if body.thread_id:
-        approval_input["thread_id"] = body.thread_id
     try:
-        result = _tf_post_sse(
-            f"/api/v1/sessions/{body.session_id}/turns",
-            {"input": [approval_input]},
-        )
-        return {"success": True, "action_id": body.action_id, "status": "approved", "analyst": analyst, "trueforge_event": result}
-    except RuntimeError:
-        raise HTTPException(status_code=502, detail="TrueForge unavailable")
+        from app.sdk_client import approve_action
+        result = approve_action(body.session_id, body.action_id, analyst)
+        if not result.get("success"):
+            raise HTTPException(status_code=409, detail=result.get("error", "Approval failed"))
+
+        # Optionally forward to TrueForge
+        tf_event = None
+        try:
+            approval_input = {
+                "type": "user.tool_approval",
+                "tool_call_id": body.action_id,
+                "approval": {"status": "allow"},
+            }
+            if body.thread_id:
+                approval_input["thread_id"] = body.thread_id
+            tf_event = _tf_post_sse(
+                f"/api/v1/sessions/{body.session_id}/turns",
+                {"input": [approval_input]},
+            )
+        except RuntimeError:
+            pass
+
+        return {
+            "success": True, "action_id": body.action_id,
+            "status": "approved", "analyst": analyst,
+            "trueforge_event": tf_event,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Approval failed")
 
 
 @router.post("/reject")
@@ -170,24 +205,41 @@ def reject_containment(
     body: DecisionRequest,
     authorization: Optional[str] = Header(None),
 ):
-    """Reject a pending tool call. Consumes SSE response."""
+    """Reject a pending tool call via local SDK + optional TrueForge."""
     analyst = _require_api_key(authorization)
-    reason = body.reason or f"Rejected by {analyst}"
-    approval_input = {
-        "type": "user.tool_approval",
-        "tool_call_id": body.action_id,
-        "approval": {"status": "deny", "reason": reason},
-    }
-    if body.thread_id:
-        approval_input["thread_id"] = body.thread_id
     try:
-        result = _tf_post_sse(
-            f"/api/v1/sessions/{body.session_id}/turns",
-            {"input": [approval_input]},
-        )
-        return {"success": True, "action_id": body.action_id, "status": "rejected", "analyst": analyst, "trueforge_event": result}
-    except RuntimeError:
-        raise HTTPException(status_code=502, detail="TrueForge unavailable")
+        from app.sdk_client import reject_action
+        result = reject_action(body.session_id, body.action_id, analyst)
+        if not result.get("success"):
+            raise HTTPException(status_code=409, detail=result.get("error", "Rejection failed"))
+
+        # Optionally forward to TrueForge
+        tf_event = None
+        try:
+            reason = body.reason or f"Rejected by {analyst}"
+            approval_input = {
+                "type": "user.tool_approval",
+                "tool_call_id": body.action_id,
+                "approval": {"status": "deny", "reason": reason},
+            }
+            if body.thread_id:
+                approval_input["thread_id"] = body.thread_id
+            tf_event = _tf_post_sse(
+                f"/api/v1/sessions/{body.session_id}/turns",
+                {"input": [approval_input]},
+            )
+        except RuntimeError:
+            pass
+
+        return {
+            "success": True, "action_id": body.action_id,
+            "status": "rejected", "analyst": analyst,
+            "trueforge_event": tf_event,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Rejection failed")
 
 
 @router.get("/pending")

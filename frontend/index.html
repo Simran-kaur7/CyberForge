@@ -87,19 +87,19 @@
     setTimeout(() => el.remove(), 3500);
   }
 
-  // ---- search + sort ----
+  // ---- search + sort (uses live DOM queries for dynamic cards) ----
   const searchInput = document.getElementById('search-input');
   const sortSelect = document.getElementById('sort-select');
   const grid = document.getElementById('incident-grid');
   const emptyState = document.getElementById('empty-state');
   const activeCount = document.getElementById('active-count');
-  const cards = Array.from(grid.querySelectorAll('.tilt-card'));
 
   function riskWeight(r){ return { high:3, medium:2, low:1 }[r] || 0; }
 
   function refreshList(){
     const q = searchInput.value.trim().toLowerCase();
     const sort = sortSelect.value;
+    const cards = Array.from(grid.querySelectorAll('.tilt-card'));
 
     let visible = cards.filter(c => {
       const hay = `${c.dataset.id} ${c.dataset.desc}`.toLowerCase();
@@ -119,10 +119,16 @@
     emptyState.style.display = visible.length === 0 ? 'block' : 'none';
     activeCount.textContent = `${visible.length} open`;
   }
+
+  function rebindControls(){
+    refreshList();
+    bindTiltAndCursor();
+  }
+
   searchInput.addEventListener('input', refreshList);
   sortSelect.addEventListener('change', refreshList);
 
-  // ---- custom reticle cursor ----
+  // ---- custom reticle cursor + tilt (rebindable for dynamic cards) ----
   const reticle = document.getElementById('reticle');
   const isCoarse = window.matchMedia('(pointer: coarse)').matches;
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -131,30 +137,44 @@
     window.addEventListener('mousemove', e=>{ mx=e.clientX; my=e.clientY; });
     function loop(){ cx += (mx-cx)*0.22; cy += (my-cy)*0.22; reticle.style.transform = `translate(${cx}px,${cy}px)`; requestAnimationFrame(loop); }
     loop();
-    document.querySelectorAll('button, a, .tilt-card, input, select').forEach(el=>{
-      el.addEventListener('mouseenter', ()=>{
-        reticle.classList.add('active');
-        if (el.querySelector && el.querySelector('.risk-high')) reticle.classList.add('risk');
-      });
-      el.addEventListener('mouseleave', ()=> reticle.classList.remove('active','risk'));
-    });
   }
 
-  // ---- 3D tilt on cards ----
-  if (!isCoarse && !reduceMotion) {
-    cards.forEach(card => {
-      card.addEventListener('mousemove', e=>{
-        const r = card.getBoundingClientRect();
-        const x = e.clientX - r.left, y = e.clientY - r.top;
-        const rx = ((y / r.height) - 0.5) * -8;
-        const ry = ((x / r.width) - 0.5) * 8;
-        card.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
+  function bindTiltAndCursor(){
+    if (!isCoarse) {
+      // Cursor hover on all interactive elements
+      document.querySelectorAll('button, a, .tilt-card, input, select').forEach(el=>{
+        el.removeEventListener('mouseenter', el._enterH);
+        el.removeEventListener('mouseleave', el._leaveH);
+        el._enterH = function(){
+          reticle.classList.add('active');
+          if (el.querySelector && el.querySelector('.risk-high')) reticle.classList.add('risk');
+        };
+        el._leaveH = function(){ reticle.classList.remove('active','risk'); };
+        el.addEventListener('mouseenter', el._enterH);
+        el.addEventListener('mouseleave', el._leaveH);
       });
-      card.addEventListener('mouseleave', ()=>{
-        card.style.transform = 'perspective(900px) rotateX(0) rotateY(0) translateZ(0)';
+    }
+    // 3D tilt on cards
+    if (!isCoarse && !reduceMotion) {
+      document.querySelectorAll('.tilt-card').forEach(card => {
+        card.removeEventListener('mousemove', card._moveH);
+        card.removeEventListener('mouseleave', card._leaveH);
+        card._moveH = function(e){
+          const r = card.getBoundingClientRect();
+          const x = e.clientX - r.left, y = e.clientY - r.top;
+          const rx = ((y / r.height) - 0.5) * -8;
+          const ry = ((x / r.width) - 0.5) * 8;
+          card.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
+        };
+        card._leaveH = function(){
+          card.style.transform = 'perspective(900px) rotateX(0) rotateY(0) translateZ(0)';
+        };
+        card.addEventListener('mousemove', card._moveH);
+        card.addEventListener('mouseleave', card._leaveH);
       });
-    });
+    }
   }
+  bindTiltAndCursor();
 
   // ---- ambient ember particles ----
   const canvas = document.getElementById('emberCanvas');
@@ -182,36 +202,94 @@
   draw();
 
 
-  // ---- load incidents from TrueForge sessions ----
-  const FORGE_URL = 'http://localhost:8790';
+  // ---- load incidents from local sessions API ----
   async function loadSessions(){
     const grid = document.getElementById('incident-grid');
     const resolvedList = document.getElementById('resolved-list');
     try {
-      const resp = await fetch(FORGE_URL + '/api/v1/sessions');
-      const data = await resp.json();
-      const sessions = data?.data || data || [];
+      const resp = await fetch('/api/sessions');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const sessions = await resp.json();
       if (!Array.isArray(sessions) || sessions.length === 0) {
-        grid.innerHTML = '<div class="empty-state" id="empty-state">No active incidents. Start an investigation from the agent.</div>';
+        grid.innerHTML = '<div class="empty-state">No active incidents. Start an investigation from the agent.</div>';
+        rebindControls();
         return;
       }
-      const active = sessions.filter(s => s.state?.status !== 'resolved');
-      const resolved = sessions.filter(s => s.state?.status === 'resolved');
-      grid.innerHTML = active.length ? active.map(s => {
-        const risk = s.state?.risk_level || 'medium';
-        return '<div class="tilt-card" data-id="' + s.id + '"><div class="eyebrow">Active Incident</div><div class="inc-id">' + (s.title || s.id) + '</div><div class="row"><span class="risk-badge risk-' + risk + '">' + risk + '</span></div><button class="btn btn-open" onclick="openIncident('' + s.id + '')">Open Incident →</button></div>';
-      }).join('') : '<div class="empty-state">No active incidents.</div>';
-      resolvedList.innerHTML = resolved.length ? resolved.map(s =>
-        '<li><span>' + (s.title || s.id) + '</span><span class="status-resolved">RESOLVED</span><button class="reopen-btn" onclick="openIncident('' + s.id + '')">Reopen</button></li>'
-      ).join('') : '<li><span class="evidence-placeholder">No resolved incidents</span></li>';
-    } catch {
-      grid.innerHTML = '<div class="empty-state">Connect to TrueForge to see live incidents.</div>';
+      const active = sessions.filter(s => s.status !== 'resolved');
+      const resolved = sessions.filter(s => s.status === 'resolved');
+
+      // Build cards with DOM elements (no innerHTML with user data)
+      grid.innerHTML = '';
+      active.forEach(s => {
+        const card = document.createElement('div');
+        card.className = 'tilt-card';
+        card.dataset.id = s.incident_id || s.id;
+        card.dataset.desc = '';
+        card.dataset.risk = s.risk_score ? String(s.risk_score) : '0';
+        card.dataset.minutes = '0';
+
+        const eyebrow = document.createElement('div');
+        eyebrow.className = 'eyebrow';
+        eyebrow.textContent = 'Active Incident';
+
+        const incId = document.createElement('div');
+        incId.className = 'inc-id';
+        incId.textContent = s.incident_id || s.id;
+
+        const row = document.createElement('div');
+        row.className = 'row';
+        const badge = document.createElement('span');
+        badge.className = 'risk-badge risk-medium';
+        badge.textContent = s.risk_score ? 'Score ' + s.risk_score : 'Unassessed';
+        row.appendChild(badge);
+n        const btn = document.createElement('button');
+        btn.className = 'btn btn-open';
+        btn.textContent = 'Open Incident \u2192';
+        btn.addEventListener('click', function() { openIncident(s.incident_id || s.id); });
+
+        card.appendChild(eyebrow);
+        card.appendChild(incId);
+        card.appendChild(row);
+        card.appendChild(btn);
+        grid.appendChild(card);
+      });
+
+      if (active.length === 0) {
+        grid.innerHTML = '<div class="empty-state">No active incidents.</div>';
+      }
+
+      // Resolved list
+      resolvedList.innerHTML = '';
+      resolved.forEach(s => {
+        const li = document.createElement('li');
+        const span = document.createElement('span');
+        span.className = 'id';
+        span.textContent = s.incident_id || s.id;
+        const status = document.createElement('span');
+        status.className = 'status-resolved';
+        status.textContent = 'RESOLVED';
+        const reopen = document.createElement('button');
+        reopen.className = 'reopen-btn';
+        reopen.textContent = 'Reopen';
+        reopen.addEventListener('click', function() { openIncident(s.incident_id || s.id); });
+        li.appendChild(span);
+        li.appendChild(status);
+        li.appendChild(reopen);
+        resolvedList.appendChild(li);
+      });
+      if (resolved.length === 0) {
+        resolvedList.innerHTML = '<li><span class="evidence-placeholder">No resolved incidents</span></li>';
+      }
+
+      rebindControls();
+    } catch(e) {
+      grid.innerHTML = '<div class="empty-state">Backend not connected. Start an investigation from the agent.</div>';
     }
   }
   loadSessions();
 
   // welcome toast
-  window.addEventListener('load', () => toast('2 active incidents awaiting investigation', 'info'));
+  window.addEventListener('load', () => toast('CyberForge dashboard loaded', 'info'));
 </script>
 
 </body>
