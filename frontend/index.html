@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyberForge — Security Investigation Workspace</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="header">
+    <div class="header-brand">
+      <h1 class="logo">&#9889; CyberForge</h1>
+      <span class="tagline">Signal from noise. Confidence before containment.</span>
+    </div>
+    <nav class="header-nav">
+      <a href="index.html" class="nav-link active">Dashboard</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="dashboard-hero">
+      <h2>Investigation Dashboard</h2>
+      <p class="subtitle">Review and manage security investigations</p>
+    </section>
+
+    <section class="pipeline">
+      <div class="pipeline-step" data-step="investigate">&#128269; Investigate</div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-step" data-step="correlate">&#128279; Correlate</div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-step" data-step="assess">&#128200; Assess</div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-step" data-step="approve">&#9989; Approve</div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-step" data-step="contain">&#128683; Contain</div>
+    </section>
+
+    <section class="incidents-section">
+      <h3>Previously Investigated Incidents</h3>
+      <div id="incidents-list" class="incidents-list">
+        <div class="loading">Loading incidents...</div>
+      </div>
+    </section>
+
+    <section class="quick-actions">
+      <h3>Quick Actions</h3>
+      <div class="action-cards">
+        <button class="action-card" onclick="startNewInvestigation('INC-1024')">
+          <span class="action-icon">&#128270;</span>
+          <span class="action-label">New Investigation</span>
+          <span class="action-desc">Start fresh analysis of INC-1024</span>
+        </button>
+        <button class="action-card" onclick="runRiskScore()">
+          <span class="action-icon">&#128200;</span>
+          <span class="action-label">Risk Score</span>
+          <span class="action-desc">Compute sandbox risk assessment</span>
+        </button>
+        <button class="action-card" onclick="checkSystemActivity()">
+          <span class="action-icon">&#128187;</span>
+          <span class="action-label">System Activity</span>
+          <span class="action-desc">Inspect host and network signals</span>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>CyberForge &mdash; Human-before-containment security investigation workspace</p>
+  </footer>
+
+  <script src="js/dashboard.js"></script>
+</body>
+</html>

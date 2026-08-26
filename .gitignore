@@ -49,7 +49,7 @@ out/
 .DS_Store
 Thumbs.db
 Desktop.ini
-
+.freebuff/
 # Runtime logs and locally generated evidence
 *.log
 !mcp_server/data/*.log

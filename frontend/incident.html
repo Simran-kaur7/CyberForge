@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyberForge — Incident Detail</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="header">
+    <div class="header-brand">
+      <h1 class="logo">&#9889; CyberForge</h1>
+      <span class="tagline">Signal from noise. Confidence before containment.</span>
+    </div>
+    <nav class="header-nav">
+      <a href="index.html" class="nav-link">Dashboard</a>
+      <a href="#" class="nav-link active" id="incident-nav">Incident</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="incident-header">
+      <div class="incident-title-row">
+        <h2 id="incident-id">INC-1024</h2>
+        <span id="risk-badge" class="risk-badge risk-loading">Loading...</span>
+      </div>
+      <p id="incident-summary" class="subtitle">Investigating SSH brute-force attack from 10.0.0.25</p>
+    </section>
+
+    <!-- Risk Score Panel -->
+    <section class="panel risk-panel">
+      <h3>&#128200; Risk Assessment</h3>
+      <div class="risk-gauge-container">
+        <div class="risk-gauge">
+          <div class="risk-gauge-fill" id="risk-gauge-fill"></div>
+          <div class="risk-gauge-label" id="risk-gauge-label">--</div>
+        </div>
+        <div class="risk-score-number" id="risk-score-number">--/100</div>
+      </div>
+      <div id="risk-breakdown" class="risk-breakdown"></div>
+    </section>
+
+    <!-- Evidence Panels -->
+    <div class="evidence-grid">
+      <section class="panel evidence-panel">
+        <h3>&#128274; Authentication Evidence</h3>
+        <div id="auth-evidence" class="evidence-content">
+          <div class="loading">Loading authentication data...</div>
+        </div>
+      </section>
+
+      <section class="panel evidence-panel">
+        <h3>&#128187; Host Activity</h3>
+        <div id="host-evidence" class="evidence-content">
+          <div class="loading">Loading host activity...</div>
+        </div>
+      </section>
+
+      <section class="panel evidence-panel">
+        <h3>&#127760; Network Connections</h3>
+        <div id="network-evidence" class="evidence-content">
+          <div class="loading">Loading network data...</div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Findings -->
+    <section class="panel findings-panel">
+      <h3>&#128269; Correlated Findings</h3>
+      <ul id="findings-list" class="findings-list"></ul>
+    </section>
+
+    <!-- Approval Gate -->
+    <section class="panel approval-panel">
+      <h3>&#128683; Containment Action</h3>
+      <div class="approval-content">
+        <p>Block IP <code id="target-ip">10.0.0.25</code> in simulated firewall?</p>
+        <div class="approval-actions" id="approval-actions">
+          <button class="btn btn-approve" id="btn-approve" onclick="handleApprove()">
+            &#9989; Approve Block
+          </button>
+          <button class="btn btn-reject" id="btn-reject" onclick="handleReject()">
+            &#10060; Reject
+          </button>
+        </div>
+        <div id="approval-status" class="approval-status"></div>
+      </div>
+    </section>
+
+    <!-- Activity Timeline -->
+    <section class="panel timeline-panel">
+      <h3>&#128336; Investigation Timeline</h3>
+      <div id="activity-timeline" class="activity-timeline"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>CyberForge &mdash; Human-before-containment security investigation workspace</p>
+  </footer>
+
+  <script src="js/activity_stream.js"></script>
+  <script src="js/incident.js"></script>
+  <script src="js/approval.js"></script>
+</body>
+</html>
