@@ -402,25 +402,53 @@
 
   // ============================================================
   //  APPROVE / REJECT
+  //  Flow: request approval (creates pending action) → approve/reject
   // ============================================================
+  var pendingActionId = null;
+
   function sendDecision(decision) {
     var btn = decision === 'approve' ? document.getElementById('approve-button') : document.getElementById('reject-button');
     btn.disabled = true;
     btn.textContent = decision === 'approve' ? 'Approving\u2026' : 'Rejecting\u2026';
 
-    var url = API_BASE + '/api/approvals/' + decision;
-    var body = {
-      session_id: sessionId || 'demo-session',
-      action_id: incidentId,
-      decided_by: 'analyst',
-      thread_id: null
-    };
+    // If we don't have a pending action_id yet, request one first
+    var actionIdPromise = pendingActionId
+      ? Promise.resolve(pendingActionId)
+      : fetch(API_BASE + '/api/approvals/request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId || 'demo-session',
+            message: 'Investigate and contain ' + incidentId
+          })
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (res.action_id) {
+            pendingActionId = res.action_id;
+            return res.action_id;
+          }
+          // TrueForge not running — use incident ID as demo fallback
+          return incidentId;
+        })
+        .catch(function () {
+          return incidentId;
+        });
 
-    fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    })
+    actionIdPromise.then(function (actionId) {
+      var url = API_BASE + '/api/approvals/' + decision;
+      var body = {
+        session_id: sessionId || 'demo-session',
+        action_id: actionId,
+        decided_by: 'analyst',
+        thread_id: null
+      };
+
+      return fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
       .then(function (r) { return r.json(); })
       .then(function (res) {
         var resultEl = document.getElementById('decision-result');
@@ -433,24 +461,26 @@
           resultEl.textContent = 'Rejected — no containment action will be taken.';
           toast('Containment rejected', 'info');
         }
-        // Disable both buttons after decision
+        pendingActionId = null;
         document.getElementById('approve-button').disabled = true;
         document.getElementById('reject-button').disabled = true;
-      })
-      .catch(function (err) {
-        // Demo fallback when backend is not running
-        var resultEl = document.getElementById('decision-result');
-        if (decision === 'approve') {
-          resultEl.className = 'decision-result approved';
-          resultEl.textContent = 'Approved (demo mode) — backend not connected.';
-        } else {
-          resultEl.className = 'decision-result rejected';
-          resultEl.textContent = 'Rejected (demo mode) — backend not connected.';
-        }
-        document.getElementById('approve-button').disabled = true;
-        document.getElementById('reject-button').disabled = true;
-        toast('Decision recorded (demo mode)', 'info');
       });
+    })
+    .catch(function () {
+      // Demo fallback when backend is not running
+      var resultEl = document.getElementById('decision-result');
+      if (decision === 'approve') {
+        resultEl.className = 'decision-result approved';
+        resultEl.textContent = 'Approved (demo mode) — backend not connected.';
+      } else {
+        resultEl.className = 'decision-result rejected';
+        resultEl.textContent = 'Rejected (demo mode) — backend not connected.';
+      }
+      pendingActionId = null;
+      document.getElementById('approve-button').disabled = true;
+      document.getElementById('reject-button').disabled = true;
+      toast('Decision recorded (demo mode)', 'info');
+    });
   }
 
   // ============================================================
