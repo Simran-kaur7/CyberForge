@@ -275,11 +275,12 @@ def update_session(sid: str, **kw) -> dict:
     return _mutate_sessions(_update)
 
 
-def set_approval_tool_call_id(sid: str, tool_call_id: str) -> dict:
+def set_approval_tool_call_id(sid: str, action_id: str, tool_call_id: str) -> dict:
     """Atomically set tool_call_id on the current approval_state.
 
-    Runs inside _mutate_sessions so no concurrent approve/reject
-    can overwrite the approval_state between our read and write.
+    Only writes if the current approval still belongs to the given
+    action_id — prevents a stale TrueForge response from overwriting
+    a newer approval's tool_call_id.
     """
     def _set(sessions):
         for s in sessions:
@@ -288,6 +289,8 @@ def set_approval_tool_call_id(sid: str, tool_call_id: str) -> dict:
             ap = s.get("approval_state")
             if not ap:
                 return {"success": False, "error": "No approval state"}
+            if ap.get("action_id") != action_id:
+                return {"success": False, "error": "Approval already replaced by a newer request"}
             ap["tool_call_id"] = tool_call_id
             s["updated_at"] = datetime.now(timezone.utc).isoformat()
             return {"success": True, "action_id": ap["action_id"]}
@@ -298,15 +301,20 @@ def set_approval_tool_call_id(sid: str, tool_call_id: str) -> dict:
 def persist_trueforge_session_id(sid: str, tf_session_id: str) -> dict:
     """Atomically persist a TrueForge session ID on the local session.
 
-    Runs inside _mutate_sessions to avoid race conditions.
+    Uses compare-and-set: only writes if the current value is still None.
+    Returns the winning ID so callers can reuse it if another request won.
     """
     def _persist(sessions):
         for s in sessions:
             if s["id"] != sid:
                 continue
+            existing = s.get("trueforge_session_id")
+            if existing:
+                # Another request already set it — return the winner
+                return {"success": True, "trueforge_session_id": existing, "reused": True}
             s["trueforge_session_id"] = tf_session_id
             s["updated_at"] = datetime.now(timezone.utc).isoformat()
-            return {"success": True}
+            return {"success": True, "trueforge_session_id": tf_session_id, "reused": False}
         return {"success": False, "error": "Session not found"}
     return _mutate_sessions(_persist)
 

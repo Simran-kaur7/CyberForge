@@ -104,9 +104,12 @@ def investigate_incident(incident_id: str):
                 timeout=10,
             )
             tf_resp = _json.loads(r.read().decode())
-            trueforge_session_id = tf_resp.get("id") or tf_resp.get("data", {}).get("id")
-            if trueforge_session_id:
-                persist_trueforge_session_id(local_session_id, trueforge_session_id)
+            new_tf_id = tf_resp.get("id") or tf_resp.get("data", {}).get("id")
+            if new_tf_id:
+                # Compare-and-set: only persist if still None
+                cas_result = persist_trueforge_session_id(local_session_id, new_tf_id)
+                # Use the winning ID (another request may have set it first)
+                trueforge_session_id = cas_result.get("trueforge_session_id", new_tf_id)
         except Exception:
             pass  # TrueForge unavailable, local-only mode
 

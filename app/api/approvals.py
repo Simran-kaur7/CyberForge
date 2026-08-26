@@ -172,9 +172,9 @@ def request_containment_approval(
             except RuntimeError:
                 pass  # TrueForge unavailable
 
-        # Atomically persist tool_call_id inside the approval state
+        # Atomically persist tool_call_id, scoped to the action_id we just created
         if tool_call_id:
-            set_approval_tool_call_id(local_session_id, tool_call_id)
+            set_approval_tool_call_id(local_session_id, result["action_id"], tool_call_id)
 
         return {
             "success": True,
