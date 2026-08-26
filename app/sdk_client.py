@@ -210,59 +210,181 @@ def request_approval(sid: str, atype: str, adetail: dict) -> dict:
     return _mutate_sessions(_req)
 
 
-def approve_action(sid: str, aid: str, decided_by: str = "analyst") -> dict:
-    """Approve only if status is pending."""
+def approve_action(
+    sid: str,
+    aid: str,
+    decided_by: str = "analyst",
+    expected_tool_call_id: str | None = None,
+    expected_trueforge_session_id: str | None = None,
+) -> dict:
+    """Approve only if status is pending and IDs match."""
     def _approve(sessions):
         for s in sessions:
             if s["id"] != sid:
                 continue
+
             current = s.get("approval_state")
+
             if not current or current.get("action_id") != aid:
-                return {"success": False, "error": "No matching pending approval"}
-            # Bug #3: enforce terminal state
+                return {
+                    "success": False,
+                    "error": "No matching pending approval",
+                }
+
             if current["status"] != "pending":
-                return {"success": False, "error": f"Action already {current['status']}"}
+                return {
+                    "success": False,
+                    "error": f"Action already {current['status']}",
+                }
+
+            stored_tool_call_id = current.get("tool_call_id")
+            stored_tf_session_id = s.get(
+                "trueforge_session_id"
+            )
+
+            if (
+                expected_tool_call_id
+                and stored_tool_call_id
+                and expected_tool_call_id != stored_tool_call_id
+            ):
+                return {
+                    "success": False,
+                    "error": (
+                        "tool_call_id does not belong "
+                        "to this action"
+                    ),
+                }
+
+            if (
+                expected_trueforge_session_id
+                and stored_tf_session_id
+                and expected_trueforge_session_id
+                != stored_tf_session_id
+            ):
+                return {
+                    "success": False,
+                    "error": (
+                        "trueforge_session_id does not "
+                        "belong to this action"
+                    ),
+                }
+
             now = datetime.now(timezone.utc).isoformat()
+
             current["status"] = "approved"
             current["decided_at"] = now
             current["decided_by"] = decided_by
+
             s["updated_at"] = now
+
             for a in s["actions"]:
                 if a["action_id"] == aid:
                     a["status"] = "approved"
                     a["decided_at"] = now
                     a["decided_by"] = decided_by
-            return {"success": True, "action_id": aid, "status": "approved"}
-        return {"success": False, "error": "Session not found"}
+
+            return {
+                "success": True,
+                "action_id": aid,
+                "status": "approved",
+                "tool_call_id": stored_tool_call_id,
+                "trueforge_session_id": stored_tf_session_id,
+            }
+
+        return {
+            "success": False,
+            "error": "Session not found",
+        }
+
     return _mutate_sessions(_approve)
 
-
-def reject_action(sid: str, aid: str, decided_by: str = "analyst") -> dict:
-    """Reject only if status is pending."""
+def reject_action(
+    sid: str,
+    aid: str,
+    decided_by: str = "analyst",
+    expected_tool_call_id: str | None = None,
+    expected_trueforge_session_id: str | None = None,
+) -> dict:
+    """Reject only if status is pending and IDs match."""
     def _reject(sessions):
         for s in sessions:
             if s["id"] != sid:
                 continue
+
             current = s.get("approval_state")
+
             if not current or current.get("action_id") != aid:
-                return {"success": False, "error": "No matching pending approval"}
-            # Bug #3: enforce terminal state
+                return {
+                    "success": False,
+                    "error": "No matching pending approval",
+                }
+
             if current["status"] != "pending":
-                return {"success": False, "error": f"Action already {current['status']}"}
+                return {
+                    "success": False,
+                    "error": f"Action already {current['status']}",
+                }
+
+            stored_tool_call_id = current.get("tool_call_id")
+            stored_tf_session_id = s.get(
+                "trueforge_session_id"
+            )
+
+            if (
+                expected_tool_call_id
+                and stored_tool_call_id
+                and expected_tool_call_id != stored_tool_call_id
+            ):
+                return {
+                    "success": False,
+                    "error": (
+                        "tool_call_id does not belong "
+                        "to this action"
+                    ),
+                }
+
+            if (
+                expected_trueforge_session_id
+                and stored_tf_session_id
+                and expected_trueforge_session_id
+                != stored_tf_session_id
+            ):
+                return {
+                    "success": False,
+                    "error": (
+                        "trueforge_session_id does not "
+                        "belong to this action"
+                    ),
+                }
+
             now = datetime.now(timezone.utc).isoformat()
+
             current["status"] = "rejected"
             current["decided_at"] = now
             current["decided_by"] = decided_by
+
             s["updated_at"] = now
+
             for a in s["actions"]:
                 if a["action_id"] == aid:
                     a["status"] = "rejected"
                     a["decided_at"] = now
                     a["decided_by"] = decided_by
-            return {"success": True, "action_id": aid, "status": "rejected"}
-        return {"success": False, "error": "Session not found"}
-    return _mutate_sessions(_reject)
 
+            return {
+                "success": True,
+                "action_id": aid,
+                "status": "rejected",
+                "tool_call_id": stored_tool_call_id,
+                "trueforge_session_id": stored_tf_session_id,
+            }
+
+        return {
+            "success": False,
+            "error": "Session not found",
+        }
+
+    return _mutate_sessions(_reject)
 
 def update_session(sid: str, **kw) -> dict:
     def _update(sessions):
