@@ -275,6 +275,42 @@ def update_session(sid: str, **kw) -> dict:
     return _mutate_sessions(_update)
 
 
+def set_approval_tool_call_id(sid: str, tool_call_id: str) -> dict:
+    """Atomically set tool_call_id on the current approval_state.
+
+    Runs inside _mutate_sessions so no concurrent approve/reject
+    can overwrite the approval_state between our read and write.
+    """
+    def _set(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+            ap = s.get("approval_state")
+            if not ap:
+                return {"success": False, "error": "No approval state"}
+            ap["tool_call_id"] = tool_call_id
+            s["updated_at"] = datetime.now(timezone.utc).isoformat()
+            return {"success": True, "action_id": ap["action_id"]}
+        return {"success": False, "error": "Session not found"}
+    return _mutate_sessions(_set)
+
+
+def persist_trueforge_session_id(sid: str, tf_session_id: str) -> dict:
+    """Atomically persist a TrueForge session ID on the local session.
+
+    Runs inside _mutate_sessions to avoid race conditions.
+    """
+    def _persist(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+            s["trueforge_session_id"] = tf_session_id
+            s["updated_at"] = datetime.now(timezone.utc).isoformat()
+            return {"success": True}
+        return {"success": False, "error": "Session not found"}
+    return _mutate_sessions(_persist)
+
+
 if __name__ == "__main__":
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else "list"

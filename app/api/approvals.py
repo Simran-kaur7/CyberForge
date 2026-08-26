@@ -131,7 +131,10 @@ def request_containment_approval(
     """
     analyst = _require_api_key(authorization)
     try:
-        from app.sdk_client import request_approval, get_session
+        from app.sdk_client import (
+            request_approval, get_session,
+            set_approval_tool_call_id, persist_trueforge_session_id,
+        )
 
         # Resolve IDs: local for CyberForge, TrueForge for upstream
         session = get_session(body.session_id)
@@ -139,6 +142,10 @@ def request_containment_approval(
         tf_session_id = body.trueforge_session_id
         if not tf_session_id and session:
             tf_session_id = session.get("trueforge_session_id")
+
+        # If the caller supplied a TrueForge session ID we don't have yet, persist it
+        if tf_session_id and session and not session.get("trueforge_session_id"):
+            persist_trueforge_session_id(local_session_id, tf_session_id)
 
         actual_incident_id = session["incident_id"] if session else local_session_id
         result = request_approval(
@@ -165,16 +172,9 @@ def request_containment_approval(
             except RuntimeError:
                 pass  # TrueForge unavailable
 
-        # Persist tool_call_id in local session's approval state
+        # Atomically persist tool_call_id inside the approval state
         if tool_call_id:
-            try:
-                from app.sdk_client import update_session, get_session
-                sess = get_session(local_session_id)
-                if sess and sess.get("approval_state"):
-                    sess["approval_state"]["tool_call_id"] = tool_call_id
-                    update_session(local_session_id, approval_state=sess["approval_state"])
-            except Exception:
-                pass
+            set_approval_tool_call_id(local_session_id, tool_call_id)
 
         return {
             "success": True,
