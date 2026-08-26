@@ -36,9 +36,9 @@
 <main id="main-content">
 
   <section class="stats-row" aria-label="Summary metrics" style="margin-bottom:0;padding-top:0;">
-    <div class="stat-card"><div class="stat-value accent">2</div><div class="stat-label">Open Incidents</div></div>
-    <div class="stat-card"><div class="stat-value">70</div><div class="stat-label">Avg. Risk Score</div></div>
-    <div class="stat-card"><div class="stat-value ok">3</div><div class="stat-label">Resolved This Week</div></div>
+    <div class="stat-card"><div class="stat-value accent" id="stat-open">0</div><div class="stat-label">Open Incidents</div></div>
+    <div class="stat-card"><div class="stat-value" id="stat-risk">--</div><div class="stat-label">Avg. Risk Score</div></div>
+    <div class="stat-card"><div class="stat-value ok" id="stat-resolved">0</div><div class="stat-label">Resolved</div></div>
     <div class="stat-card"><div class="stat-value ok">99.8%</div><div class="stat-label">Agent Uptime</div></div>
   </section>
 
@@ -55,56 +55,15 @@
     </div>
 
     <div class="incident-grid" id="incident-grid" aria-live="polite">
-
-      <div class="tilt-card" data-id="INC-1024" data-desc="Suspicious SSH Activity" data-risk="high" data-risk-num="3" data-minutes="4">
-        <div class="eyebrow">Active Incident</div>
-        <div class="inc-id">INC-1024</div>
-        <p class="inc-desc">Suspicious SSH Activity</p>
-        <div class="row">
-          <span class="risk-badge risk-high">High Risk</span>
-          <span class="meta">detected 4m ago</span>
-        </div>
-        <button class="btn btn-open" onclick="openIncident('INC-1024')">
-          Open Incident <span aria-hidden="true">→</span>
-        </button>
       </div>
-
-      <div class="tilt-card" data-id="INC-1025" data-desc="Unusual Network Activity" data-risk="medium" data-risk-num="2" data-minutes="21">
-        <div class="eyebrow">Active Incident</div>
-        <div class="inc-id">INC-1025</div>
-        <p class="inc-desc">Unusual Network Activity</p>
-        <div class="row">
-          <span class="risk-badge risk-medium">Medium Risk</span>
-          <span class="meta">detected 21m ago</span>
-        </div>
-        <button class="btn btn-open" onclick="openIncident('INC-1025')">
-          Open Incident <span aria-hidden="true">→</span>
-        </button>
-      </div>
-
-    </div>
     <div class="empty-state" id="empty-state" style="display:none;">No incidents match your search.</div>
   </section>
 
   <section id="resolved">
-    <div class="section-head"><h2>Previously Investigated</h2><span class="count">3 resolved</span></div>
-    <ul class="log-list">
-      <li>
-        <span class="id">INC-1001</span>
-        <span class="status-resolved">RESOLVED</span>
-        <button class="reopen-btn" onclick="openIncident('INC-1001')">Reopen</button>
-      </li>
-      <li>
-        <span class="id">INC-1002</span>
-        <span class="status-resolved">RESOLVED</span>
-        <button class="reopen-btn" onclick="openIncident('INC-1002')">Reopen</button>
-      </li>
-      <li>
-        <span class="id">INC-1003</span>
-        <span class="status-resolved">RESOLVED</span>
-        <button class="reopen-btn" onclick="openIncident('INC-1003')">Reopen</button>
-      </li>
-    </ul>
+    <div class="section-head"><h2>Previously Investigated</h2><span class="count" id="resolved-count">0 resolved</span></div>
+    <ul class="log-list" id="resolved-list">
+        <li><span class="evidence-placeholder">Loading…</span></li>
+      </ul>
   </section>
 
 </main>
@@ -128,19 +87,19 @@
     setTimeout(() => el.remove(), 3500);
   }
 
-  // ---- search + sort ----
+  // ---- search + sort (uses live DOM queries for dynamic cards) ----
   const searchInput = document.getElementById('search-input');
   const sortSelect = document.getElementById('sort-select');
   const grid = document.getElementById('incident-grid');
   const emptyState = document.getElementById('empty-state');
   const activeCount = document.getElementById('active-count');
-  const cards = Array.from(grid.querySelectorAll('.tilt-card'));
 
-  function riskWeight(r){ return { high:3, medium:2, low:1 }[r] || 0; }
+  function riskWeight(r){ return Number(r) || 0; }
 
   function refreshList(){
     const q = searchInput.value.trim().toLowerCase();
     const sort = sortSelect.value;
+    const cards = Array.from(grid.querySelectorAll('.tilt-card'));
 
     let visible = cards.filter(c => {
       const hay = `${c.dataset.id} ${c.dataset.desc}`.toLowerCase();
@@ -151,7 +110,7 @@
 
     const sorted = [...visible].sort((a,b) => {
       if (sort === 'risk') return riskWeight(b.dataset.risk) - riskWeight(a.dataset.risk);
-      if (sort === 'recent') return Number(a.dataset.minutes) - Number(b.dataset.minutes);
+      if (sort === 'recent') return Number(b.dataset.created) - Number(a.dataset.created);
       if (sort === 'id') return a.dataset.id.localeCompare(b.dataset.id);
       return 0;
     });
@@ -160,10 +119,16 @@
     emptyState.style.display = visible.length === 0 ? 'block' : 'none';
     activeCount.textContent = `${visible.length} open`;
   }
+
+  function rebindControls(){
+    refreshList();
+    bindTiltAndCursor();
+  }
+
   searchInput.addEventListener('input', refreshList);
   sortSelect.addEventListener('change', refreshList);
 
-  // ---- custom reticle cursor ----
+  // ---- custom reticle cursor + tilt (rebindable for dynamic cards) ----
   const reticle = document.getElementById('reticle');
   const isCoarse = window.matchMedia('(pointer: coarse)').matches;
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -172,30 +137,44 @@
     window.addEventListener('mousemove', e=>{ mx=e.clientX; my=e.clientY; });
     function loop(){ cx += (mx-cx)*0.22; cy += (my-cy)*0.22; reticle.style.transform = `translate(${cx}px,${cy}px)`; requestAnimationFrame(loop); }
     loop();
-    document.querySelectorAll('button, a, .tilt-card, input, select').forEach(el=>{
-      el.addEventListener('mouseenter', ()=>{
-        reticle.classList.add('active');
-        if (el.querySelector && el.querySelector('.risk-high')) reticle.classList.add('risk');
-      });
-      el.addEventListener('mouseleave', ()=> reticle.classList.remove('active','risk'));
-    });
   }
 
-  // ---- 3D tilt on cards ----
-  if (!isCoarse && !reduceMotion) {
-    cards.forEach(card => {
-      card.addEventListener('mousemove', e=>{
-        const r = card.getBoundingClientRect();
-        const x = e.clientX - r.left, y = e.clientY - r.top;
-        const rx = ((y / r.height) - 0.5) * -8;
-        const ry = ((x / r.width) - 0.5) * 8;
-        card.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
+  function bindTiltAndCursor(){
+    if (!isCoarse) {
+      // Cursor hover on all interactive elements
+      document.querySelectorAll('button, a, .tilt-card, input, select').forEach(el=>{
+        el.removeEventListener('mouseenter', el._enterH);
+        el.removeEventListener('mouseleave', el._leaveH);
+        el._enterH = function(){
+          reticle.classList.add('active');
+          if (el.querySelector && el.querySelector('.risk-high')) reticle.classList.add('risk');
+        };
+        el._leaveH = function(){ reticle.classList.remove('active','risk'); };
+        el.addEventListener('mouseenter', el._enterH);
+        el.addEventListener('mouseleave', el._leaveH);
       });
-      card.addEventListener('mouseleave', ()=>{
-        card.style.transform = 'perspective(900px) rotateX(0) rotateY(0) translateZ(0)';
+    }
+    // 3D tilt on cards
+    if (!isCoarse && !reduceMotion) {
+      document.querySelectorAll('.tilt-card').forEach(card => {
+        card.removeEventListener('mousemove', card._moveH);
+        card.removeEventListener('mouseleave', card._leaveH);
+        card._moveH = function(e){
+          const r = card.getBoundingClientRect();
+          const x = e.clientX - r.left, y = e.clientY - r.top;
+          const rx = ((y / r.height) - 0.5) * -8;
+          const ry = ((x / r.width) - 0.5) * 8;
+          card.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
+        };
+        card._leaveH = function(){
+          card.style.transform = 'perspective(900px) rotateX(0) rotateY(0) translateZ(0)';
+        };
+        card.addEventListener('mousemove', card._moveH);
+        card.addEventListener('mouseleave', card._leaveH);
       });
-    });
+    }
   }
+  bindTiltAndCursor();
 
   // ---- ambient ember particles ----
   const canvas = document.getElementById('emberCanvas');
@@ -222,8 +201,121 @@
   }
   draw();
 
+
+  // ---- load incidents from local sessions API ----
+  async function loadSessions(){
+    const grid = document.getElementById('incident-grid');
+    const resolvedList = document.getElementById('resolved-list');
+    try {
+      const resp = await fetch('/api/sessions');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const sessions = await resp.json();
+      if (!Array.isArray(sessions) || sessions.length === 0) {
+        grid.innerHTML = '<div class="empty-state">No active incidents. Start an investigation from the agent.</div>';
+        rebindControls();
+        return;
+      }
+      const active = sessions.filter(s => s.status !== 'resolved');
+      const resolved = sessions.filter(s => s.status === 'resolved');
+
+      // Update summary counts
+      document.getElementById('stat-open').textContent = active.length;
+      document.getElementById('stat-resolved').textContent = resolved.length;
+      document.getElementById('resolved-count').textContent = resolved.length + ' resolved';
+
+      // Compute average risk score from active sessions
+      // Only include sessions that actually have a risk_score (not null/undefined)
+      const riskScores = active.map(s => {
+        if (s.risk_score && typeof s.risk_score === 'object') return s.risk_score.score;
+        if (s.risk_score !== null && s.risk_score !== undefined) return Number(s.risk_score);
+        return null;
+      }).filter(n => n !== null);
+      const avgRisk = riskScores.length > 0 ? Math.round(riskScores.reduce((a,b)=>a+b,0) / riskScores.length) : '--';
+      document.getElementById('stat-risk').textContent = avgRisk;
+
+      // Build cards with DOM elements (no innerHTML with user data)
+      grid.innerHTML = '';
+      active.forEach(s => {
+        const card = document.createElement('div');
+        card.className = 'tilt-card';
+        card.dataset.id = s.incident_id || s.id;
+        card.dataset.desc = '';
+        var riskScore = 0;
+        var riskLevel = 'medium';
+        if (s.risk_score && typeof s.risk_score === 'object') {
+          riskScore = s.risk_score.score || 0;
+          riskLevel = (s.risk_score.level || 'MEDIUM').toLowerCase();
+        } else if (s.risk_score) {
+          riskScore = Number(s.risk_score);
+          riskLevel = riskScore >= 80 ? 'critical' : riskScore >= 60 ? 'high' : riskScore >= 30 ? 'medium' : 'low';
+        }
+        var createdTs = s.created_at ? new Date(s.created_at).getTime() : 0;
+        card.dataset.risk = String(riskScore);
+        card.dataset.created = String(createdTs);
+
+        const eyebrow = document.createElement('div');
+        eyebrow.className = 'eyebrow';
+        eyebrow.textContent = 'Active Incident';
+
+        const incId = document.createElement('div');
+        incId.className = 'inc-id';
+        incId.textContent = s.incident_id || s.id;
+
+        const row = document.createElement('div');
+        row.className = 'row';
+        const badge = document.createElement('span');
+        badge.className = 'risk-badge risk-' + riskLevel;
+        var hasAssessed = s.risk_score !== null && s.risk_score !== undefined;
+        badge.textContent = hasAssessed ? riskLevel.toUpperCase() + ' ' + riskScore : 'Unassessed';
+        row.appendChild(badge);
+n        const btn = document.createElement('button');
+        btn.className = 'btn btn-open';
+        btn.textContent = 'Open Incident \u2192';
+        btn.addEventListener('click', function() { openIncident(s.incident_id || s.id); });
+
+        card.appendChild(eyebrow);
+        card.appendChild(incId);
+        card.appendChild(row);
+        card.appendChild(btn);
+        grid.appendChild(card);
+      });
+
+      if (active.length === 0) {
+        grid.innerHTML = '<div class="empty-state">No active incidents.</div>';
+      }
+
+      // Resolved list
+      resolvedList.innerHTML = '';
+      resolved.forEach(s => {
+        const li = document.createElement('li');
+        const span = document.createElement('span');
+        span.className = 'id';
+        span.textContent = s.incident_id || s.id;
+        const status = document.createElement('span');
+        status.className = 'status-resolved';
+        status.textContent = 'RESOLVED';
+        const reopen = document.createElement('button');
+        reopen.className = 'reopen-btn';
+        reopen.textContent = 'Reopen';
+        reopen.addEventListener('click', function() { openIncident(s.incident_id || s.id); });
+        li.appendChild(span);
+        li.appendChild(status);
+        li.appendChild(reopen);
+        resolvedList.appendChild(li);
+      });
+      if (resolved.length === 0) {
+        resolvedList.innerHTML = '<li><span class="evidence-placeholder">No resolved incidents</span></li>';
+      }
+
+      rebindControls();
+    } catch(e) {
+      grid.innerHTML = '<div class="empty-state">Backend not connected. Start an investigation from the agent.</div>';
+    }
+  }
+  loadSessions();
+
   // welcome toast
-  window.addEventListener('load', () => toast('2 active incidents awaiting investigation', 'info'));
+  window.addEventListener('load', () => toast('CyberForge dashboard loaded', 'info'));
 </script>
 
 </body>

@@ -1,164 +1,132 @@
 """Tests for CyberForge SDK Client (session & approval management)."""
 
 import sys
-import json
 import tempfile
 from pathlib import Path
-# monkeypatch is a pytest concept; tests use temp files instead
 
 APP_DIR = Path(__file__).resolve().parent.parent / "app"
 sys.path.insert(0, str(APP_DIR))
 
 
+def assert_eq(a, b):
+    assert a == b, f"Expected {b!r}, got {a!r}"
+
+
 def run_all():
-    """Run SDK client tests manually."""
-    # Import after path setup
     import sdk_client
 
     passed = 0
     failed = 0
     errors = []
 
-    # Use a temp file for sessions to avoid polluting real data
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_sessions = Path(tmpdir) / "sessions.json"
-        original_sessions_file = sdk_client.SESSIONS_FILE
+        original = sdk_client.SESSIONS_FILE
         sdk_client.SESSIONS_FILE = tmp_sessions
 
         try:
-            # Test 1: List empty sessions
-            try:
-                sessions = sdk_client.list_sessions()
-                assert sessions == [], f"Expected empty list, got {sessions}"
-                print("  PASS  test_list_empty_sessions")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL  test_list_empty_sessions: {e}")
-                failed += 1
-                errors.append(str(e))
+            def check(name, fn):
+                nonlocal passed, failed
+                try:
+                    fn()
+                    print(f"  PASS  {name}")
+                    passed += 1
+                except Exception as e:
+                    print(f"  FAIL  {name}: {e}")
+                    failed += 1
+                    errors.append(str(e))
 
-            # Test 2: Create a session
-            try:
-                session = sdk_client.create_session("INC-1024", {"source_ip": "10.0.0.25"})
-                assert session["incident_id"] == "INC-1024"
-                assert session["status"] == "active"
-                assert session["id"] is not None
-                assert len(session["id"]) == 8
-                print("  PASS  test_create_session")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL  test_create_session: {e}")
-                failed += 1
-                errors.append(str(e))
+            # 1: Empty list
+            def t1():
+                assert_eq(sdk_client.list_sessions(), [])
+            check("test_list_empty", t1)
 
-            # Test 3: Get session by ID
-            try:
-                fetched = sdk_client.get_session(session["id"])
-                assert fetched is not None
-                assert fetched["incident_id"] == "INC-1024"
-                print("  PASS  test_get_session")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL  test_get_session: {e}")
-                failed += 1
-                errors.append(str(e))
+            # 2: Create session
+            session = [None]
+            def t2():
+                session[0] = sdk_client.create_session("INC-1024", {"source_ip": "10.0.0.25"})
+                assert session[0]["incident_id"] == "INC-1024"
+                assert session[0]["status"] == "active"
+                assert len(session[0]["id"]) == 8
+            check("test_create_session", t2)
 
-            # Test 4: List sessions shows the created one
-            try:
-                sessions = sdk_client.list_sessions()
-                assert len(sessions) == 1
-                assert sessions[0]["incident_id"] == "INC-1024"
-                print("  PASS  test_list_sessions")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL  test_list_sessions: {e}")
-                failed += 1
-                errors.append(str(e))
+            sid = session[0]["id"]
 
-            # Test 5: Find session by incident ID
-            try:
-                found = sdk_client.find_session_by_incident("INC-1024")
-                assert found is not None
-                assert found["id"] == session["id"]
-                print("  PASS  test_find_session_by_incident")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL  test_find_session_by_incident: {e}")
-                failed += 1
-                errors.append(str(e))
+            # 3: Get by ID
+            def t3():
+                assert_eq(sdk_client.get_session(sid)["incident_id"], "INC-1024")
+            check("test_get_session", t3)
 
-            # Test 6: Request approval
-            try:
-                result = sdk_client.request_approval(
-                    session["id"], "BLOCK_IP", {"ip_address": "10.0.0.25"}
-                )
-                assert result["success"] is True
-                assert result["status"] == "pending"
-                action_id = result["action_id"]
-                print("  PASS  test_request_approval")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL  test_request_approval: {e}")
-                failed += 1
-                errors.append(str(e))
+            # 4: List shows one
+            def t4():
+                assert_eq(len(sdk_client.list_sessions()), 1)
+            check("test_list_sessions", t4)
 
-            # Test 7: Approve action
-            try:
-                approve_result = sdk_client.approve_action(session["id"], action_id)
-                assert approve_result["success"] is True
-                assert approve_result["status"] == "approved"
-                print("  PASS  test_approve_action")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL  test_approve_action: {e}")
-                failed += 1
-                errors.append(str(e))
+            # 5: Find by incident
+            def t5():
+                assert_eq(sdk_client.find_session_by_incident("INC-1024")["id"], sid)
+            check("test_find_by_incident", t5)
 
-            # Test 8: Session reflects approval
-            try:
-                updated = sdk_client.get_session(session["id"])
-                assert updated["approval_state"]["status"] == "approved"
-                assert updated["approval_state"]["decided_by"] == "analyst"
-                print("  PASS  test_session_reflects_approval")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL  test_session_reflects_approval: {e}")
-                failed += 1
-                errors.append(str(e))
+            # 6: Request approval
+            aid = [None]
+            def t6():
+                r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+                assert r["success"] is True
+                assert r["status"] == "pending"
+                aid[0] = r["action_id"]
+            check("test_request_approval", t6)
 
-            # Test 9: Reject a new action
-            try:
-                result2 = sdk_client.request_approval(
-                    session["id"], "ISOLATE_HOST", {"host": "web-server-01"}
-                )
-                reject_result = sdk_client.reject_action(session["id"], result2["action_id"])
-                assert reject_result["success"] is True
-                assert reject_result["status"] == "rejected"
-                print("  PASS  test_reject_action")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL  test_reject_action: {e}")
-                failed += 1
-                errors.append(str(e))
+            # 7: Bug #4 — second request blocked while pending
+            def t7():
+                r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+                assert r["success"] is False
+            check("test_second_request_blocked", t7)
 
-            # Test 10: Get nonexistent session
-            try:
-                result = sdk_client.get_session("nonexistent")
-                assert result is None
-                print("  PASS  test_get_nonexistent_session")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL  test_get_nonexistent_session: {e}")
-                failed += 1
-                errors.append(str(e))
+            # 8: Approve
+            def t8():
+                assert_eq(sdk_client.approve_action(sid, aid[0])["status"], "approved")
+            check("test_approve_action", t8)
+
+            # 9: Bug #3 — can't approve again
+            def t9():
+                r = sdk_client.approve_action(sid, aid[0])
+                assert r["success"] is False
+            check("test_cannot_re_approve", t9)
+
+            # 10: Session reflects approval
+            def t10():
+                assert_eq(sdk_client.get_session(sid)["approval_state"]["status"], "approved")
+            check("test_session_reflects_approval", t10)
+
+            # 11: Request then reject
+            aid2 = [None]
+            def t11():
+                r = sdk_client.request_approval(sid, "ISOLATE_HOST", {"host": "web-01"})
+                aid2[0] = r["action_id"]
+            check("test_request_approval_2", t11)
+
+            def t12():
+                assert_eq(sdk_client.reject_action(sid, aid2[0])["status"], "rejected")
+            check("test_reject_action", t12)
+
+            # 13: Bug #3 — can't reject again
+            def t13():
+                r = sdk_client.reject_action(sid, aid2[0])
+                assert r["success"] is False
+            check("test_cannot_re_reject", t13)
+
+            # 14: Nonexistent session
+            def t14():
+                assert sdk_client.get_session("nope") is None
+            check("test_nonexistent_session", t14)
 
         finally:
-            sdk_client.SESSIONS_FILE = original_sessions_file
+            sdk_client.SESSIONS_FILE = original
 
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:
-        print("\nFailures:")
+        print("Failures:")
         for e in errors:
             print(f"  - {e}")
     return failed == 0

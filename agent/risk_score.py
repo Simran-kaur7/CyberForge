@@ -82,6 +82,7 @@ def compute_risk_score(risk_indicators: dict, known_bad_ips: list[str] | None = 
         breakdown["unusual_connection"] = {"points": 0, "reason": "No unusual connections detected"}
 
     # Known-bad source IP: +10
+    # Accept source_ip from risk_indicators or as a standalone key
     source_ip = risk_indicators.get("source_ip", "")
     if source_ip in known_bad_ips:
         pts = WEIGHTS["known_bad_source"]
