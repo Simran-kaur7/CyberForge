@@ -296,6 +296,8 @@ def request_containment_approval(
                 thread_id = tf_event.get("thread_id")
 
             except RuntimeError as exc:
+                # Keep detailed exception context in server logs only.
+                print(f"TrueForge forward failed for session {local_session_id}: {exc}")
                 # Keep the local approval pending so the request can be retried.
                 return {
                     "success": True,
@@ -306,7 +308,7 @@ def request_containment_approval(
                     "thread_id": None,
                     "analyst": analyst,
                     "trueforge_event": None,
-                    "trueforge_forward_error": str(exc),
+                    "trueforge_forward_error": "Failed to forward request to TrueForge; please retry.",
                     "retryable": True,
                 }
 
