@@ -56,3 +56,4 @@ Desktop.ini
 logs/
 audit_logs/
 evidence/
+*.lock
