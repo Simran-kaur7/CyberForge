@@ -149,6 +149,7 @@ section{ margin-bottom:56px; }
 .inc-desc{ color:var(--ink-dim); font-size:14px; margin:0 0 18px; }
 .row{ display:flex; align-items:center; justify-content:space-between; }
 .risk-badge{ font-family:var(--font-mono); font-size:11px; letter-spacing:.08em; padding:4px 10px; border:1px solid; text-transform:uppercase; }
+.risk-critical{ color:#ff2d2d; border-color:#ff2d2d55; background:#ff2d2d0f; }
 .risk-high{ color:var(--ember-red); border-color:#ff4d4d55; background:#ff4d4d0f; }
 .risk-medium{ color:var(--ember); border-color:#ff8a3d55; background:#ff8a3d0f; }
 .risk-low{ color:var(--spark); border-color:#4dd8ff55; background:#4dd8ff0f; }
