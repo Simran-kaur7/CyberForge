@@ -416,7 +416,8 @@
   //  APPROVE / REJECT
   //  Flow: request approval (creates pending action) → approve/reject
   // ============================================================
-  var pendingActionId = null;
+  var pendingLocalActionId = null;
+  var pendingToolCallId = null;
 
   function sendDecision(decision) {
     var btn = decision === 'approve' ? document.getElementById('approve-button') : document.getElementById('reject-button');
@@ -424,8 +425,8 @@
     btn.textContent = decision === 'approve' ? 'Approving\u2026' : 'Rejecting\u2026';
 
     // If we don't have a pending action_id yet, request one first
-    var actionIdPromise = pendingActionId
-      ? Promise.resolve(pendingActionId)
+    var actionIdPromise = pendingLocalActionId
+      ? Promise.resolve(pendingLocalActionId)
       : fetch(API_BASE + '/api/approvals/request', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -439,27 +440,24 @@
           return r.json();
         })
         .then(function (res) {
-          // Extract tool_call_id from TrueForge event if available
+          // Preserve both IDs: local action_id for SDK, tool_call_id for TrueForge
+          pendingLocalActionId = res.action_id || null;
           var event = res.trueforge_event || {};
-          var toolCallId = event.tool_call_id || event.tool_call?.id || res.action_id || null;
-          if (toolCallId) {
-            pendingActionId = toolCallId;
-            return toolCallId;
-          }
-          // TrueForge not running — use incident ID as demo fallback
-          return incidentId;
+          pendingToolCallId = event.tool_call_id || event.tool_call?.id || null;
+          return pendingLocalActionId || incidentId;
         })
         .catch(function () {
           return incidentId;
         });
 
-    actionIdPromise.then(function (actionId) {
+    actionIdPromise.then(function (localActionId) {
       var url = API_BASE + '/api/approvals/' + decision;
       var body = {
         session_id: sessionId || 'demo-session',
-        action_id: actionId,
+        action_id: localActionId,
         decided_by: 'analyst',
-        thread_id: null
+        thread_id: null,
+        tool_call_id: pendingToolCallId
       };
 
       return fetch(url, {
@@ -483,7 +481,8 @@
           resultEl.textContent = 'Rejected — no containment action will be taken.';
           toast('Containment rejected', 'info');
         }
-        pendingActionId = null;
+        pendingLocalActionId = null;
+        pendingToolCallId = null;
         document.getElementById('approve-button').disabled = true;
         document.getElementById('reject-button').disabled = true;
       });
@@ -498,7 +497,8 @@
         resultEl.className = 'decision-result rejected';
         resultEl.textContent = 'Rejected (demo mode) — backend not connected.';
       }
-      pendingActionId = null;
+      pendingLocalActionId = null;
+      pendingToolCallId = null;
       document.getElementById('approve-button').disabled = true;
       document.getElementById('reject-button').disabled = true;
       toast('Decision recorded (demo mode)', 'info');

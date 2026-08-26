@@ -128,10 +128,12 @@ def request_containment_approval(
     """
     analyst = _require_api_key(authorization)
     try:
-        from app.sdk_client import request_approval
+        from app.sdk_client import request_approval, get_session
+        session = get_session(body.session_id)
+        actual_incident_id = session["incident_id"] if session else body.session_id
         result = request_approval(
             body.session_id, "block_ip",
-            {"incident_id": body.session_id, "message": body.message}
+            {"incident_id": actual_incident_id, "message": body.message}
         )
         if not result.get("success"):
             raise HTTPException(status_code=409, detail=result.get("error", "Request failed"))

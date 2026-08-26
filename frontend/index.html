@@ -36,9 +36,9 @@
 <main id="main-content">
 
   <section class="stats-row" aria-label="Summary metrics" style="margin-bottom:0;padding-top:0;">
-    <div class="stat-card"><div class="stat-value accent">2</div><div class="stat-label">Open Incidents</div></div>
-    <div class="stat-card"><div class="stat-value">70</div><div class="stat-label">Avg. Risk Score</div></div>
-    <div class="stat-card"><div class="stat-value ok">3</div><div class="stat-label">Resolved This Week</div></div>
+    <div class="stat-card"><div class="stat-value accent" id="stat-open">0</div><div class="stat-label">Open Incidents</div></div>
+    <div class="stat-card"><div class="stat-value" id="stat-risk">--</div><div class="stat-label">Avg. Risk Score</div></div>
+    <div class="stat-card"><div class="stat-value ok" id="stat-resolved">0</div><div class="stat-label">Resolved</div></div>
     <div class="stat-card"><div class="stat-value ok">99.8%</div><div class="stat-label">Agent Uptime</div></div>
   </section>
 
@@ -60,7 +60,7 @@
   </section>
 
   <section id="resolved">
-    <div class="section-head"><h2>Previously Investigated</h2><span class="count">3 resolved</span></div>
+    <div class="section-head"><h2>Previously Investigated</h2><span class="count" id="resolved-count">0 resolved</span></div>
     <ul class="log-list" id="resolved-list">
         <li><span class="evidence-placeholder">Loading…</span></li>
       </ul>
@@ -94,7 +94,7 @@
   const emptyState = document.getElementById('empty-state');
   const activeCount = document.getElementById('active-count');
 
-  function riskWeight(r){ return { high:3, medium:2, low:1 }[r] || 0; }
+  function riskWeight(r){ return Number(r) || 0; }
 
   function refreshList(){
     const q = searchInput.value.trim().toLowerCase();
@@ -110,7 +110,7 @@
 
     const sorted = [...visible].sort((a,b) => {
       if (sort === 'risk') return riskWeight(b.dataset.risk) - riskWeight(a.dataset.risk);
-      if (sort === 'recent') return Number(a.dataset.minutes) - Number(b.dataset.minutes);
+      if (sort === 'recent') return Number(b.dataset.created) - Number(a.dataset.created);
       if (sort === 'id') return a.dataset.id.localeCompare(b.dataset.id);
       return 0;
     });
@@ -218,6 +218,19 @@
       const active = sessions.filter(s => s.status !== 'resolved');
       const resolved = sessions.filter(s => s.status === 'resolved');
 
+      // Update summary counts
+      document.getElementById('stat-open').textContent = active.length;
+      document.getElementById('stat-resolved').textContent = resolved.length;
+      document.getElementById('resolved-count').textContent = resolved.length + ' resolved';
+
+      // Compute average risk score from active sessions
+      const riskScores = active.map(s => {
+        if (s.risk_score && typeof s.risk_score === 'object') return s.risk_score.score || 0;
+        return Number(s.risk_score) || 0;
+      }).filter(n => n > 0);
+      const avgRisk = riskScores.length > 0 ? Math.round(riskScores.reduce((a,b)=>a+b,0) / riskScores.length) : '--';
+      document.getElementById('stat-risk').textContent = avgRisk;
+
       // Build cards with DOM elements (no innerHTML with user data)
       grid.innerHTML = '';
       active.forEach(s => {
@@ -225,8 +238,18 @@
         card.className = 'tilt-card';
         card.dataset.id = s.incident_id || s.id;
         card.dataset.desc = '';
-        card.dataset.risk = s.risk_score ? String(s.risk_score) : '0';
-        card.dataset.minutes = '0';
+        var riskScore = 0;
+        var riskLevel = 'medium';
+        if (s.risk_score && typeof s.risk_score === 'object') {
+          riskScore = s.risk_score.score || 0;
+          riskLevel = (s.risk_score.level || 'MEDIUM').toLowerCase();
+        } else if (s.risk_score) {
+          riskScore = Number(s.risk_score);
+          riskLevel = riskScore >= 80 ? 'critical' : riskScore >= 60 ? 'high' : riskScore >= 30 ? 'medium' : 'low';
+        }
+        var createdTs = s.created_at ? new Date(s.created_at).getTime() : 0;
+        card.dataset.risk = String(riskScore);
+        card.dataset.created = String(createdTs);
 
         const eyebrow = document.createElement('div');
         eyebrow.className = 'eyebrow';
@@ -239,8 +262,8 @@
         const row = document.createElement('div');
         row.className = 'row';
         const badge = document.createElement('span');
-        badge.className = 'risk-badge risk-medium';
-        badge.textContent = s.risk_score ? 'Score ' + s.risk_score : 'Unassessed';
+        badge.className = 'risk-badge risk-' + riskLevel;
+        badge.textContent = riskScore > 0 ? riskLevel.toUpperCase() + ' ' + riskScore : 'Unassessed';
         row.appendChild(badge);
 n        const btn = document.createElement('button');
         btn.className = 'btn btn-open';
