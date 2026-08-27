@@ -90,8 +90,14 @@ class TestAnalyzeEvidence:
 class TestAnalyzeEvidenceNumericValidation:
     def _run(self, auth, activity):
         from unittest.mock import patch
-        with patch("analyze_evidence.search_security_logs", return_value=auth), \
-             patch("analyze_evidence.check_system_activity", return_value=activity):
+
+        with patch(
+            "mcp_server.tools.analyze_evidence.search_security_logs",
+            return_value=auth,
+        ), patch(
+            "mcp_server.tools.analyze_evidence.check_system_activity",
+            return_value=activity,
+        ):
             return analyze_evidence()
 
     def test_failed_logins_malformed(self):
