@@ -333,6 +333,48 @@ def run_all():
                 assert e.detail == "Investigation session could not be persisted."
     check("test_session_persistence_failure_is_controlled", t31)
 
+    # 32: /api/investigate creates a session_id
+    def t32():
+        from app.api.investigate import investigate, InvestigationRequest
+        from app import sdk_client
+        import tempfile
+        from pathlib import Path
+
+        original_sessions = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir) / "sessions.json"
+            sdk_client.SESSIONS_FILE = tmp
+            try:
+                from unittest.mock import patch
+                fake_result = {
+                    "success": True,
+                    "status": "complete",
+                    "evidence_complete": True,
+                    "query": "Investigate 10.0.0.25",
+                    "target_ip": "10.0.0.25",
+                    "severity": "HIGH",
+                    "risk_score": {"score": 80, "level": "HIGH", "max_score": 100, "breakdown": {}},
+                    "findings": ["test"],
+                    "evidence": ["evidence"],
+                    "tools_used": ["test"],
+                    "recommendation": "test",
+                    "containment_allowed": True,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation", return_value=fake_result):
+                    result = investigate(InvestigationRequest(query="Investigate 10.0.0.25"))
+                assert "session_id" in result, f"Missing session_id in: {list(result.keys())}"
+                assert result["session_id"] is not None
+                assert len(result["session_id"]) == 8
+                # Verify session exists in the store
+                sess = sdk_client.get_session(result["session_id"])
+                assert sess is not None
+                assert sess["incident_id"] == "Investigate 10.0.0.25"
+            finally:
+                sdk_client.SESSIONS_FILE = original_sessions
+    check("test_investigate_creates_session", t32)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:

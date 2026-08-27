@@ -143,6 +143,18 @@ class TestExtractTargetIp:
     def test_returns_none_for_none(self):
         assert extract_target_ip(None) is None
 
+    def test_rejects_trailing_octets(self):
+        """10.0.0.25.99 must NOT extract 10.0.0.25 as a substring."""
+        assert extract_target_ip("Check 10.0.0.25.99") is None
+
+    def test_rejects_prefix_digits(self):
+        """910.0.0.25 is not a valid first octet."""
+        assert extract_target_ip("Check 910.0.0.25") is None
+
+    def test_rejects_dotted_suffix(self):
+        """10.0.0.25.1 is too many octets."""
+        assert extract_target_ip("Check 10.0.0.25.1") is None
+
 
 # ===========================================================================
 #  3. _sanitize_tool_result
@@ -352,16 +364,22 @@ class TestRunInvestigationMocked:
         mock_analysis.assert_called_once_with("192.168.99.99")
         assert result["success"] is True
         assert result["target_ip"] == "192.168.99.99"
-        assert result["risk_score"]["breakdown"]["known_bad_source"]["points"] == 0
+        # Analysis is discarded (wrong source_ip) → risk is UNKNOWN
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["risk_score"]["score"] is None
+        assert result["containment_allowed"] is False
 
     @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
     @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
     @patch("agent.analyze_evidence", return_value=FAKE_ANALYSIS_SUCCESS)
     def test_no_target_ip(self, mock_analysis, mock_activity, mock_log):
         result = run_investigation("Check general system activity")
-        mock_analysis.assert_called_once_with()
+        # No target IP → analyze_evidence should NOT be called
+        mock_analysis.assert_not_called()
         assert result["success"] is True
+        assert result["status"] == "partial"
         assert result["target_ip"] == "unknown"
+        assert result["risk_score"]["level"] == "UNKNOWN"
 
     @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
     @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
@@ -446,6 +464,34 @@ class TestTargetMismatch:
 
 
 # ===========================================================================
+# 9b. No target — analysis should NOT be called
+# ===========================================================================
+class TestNoTargetAnalysis:
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence")
+    def test_no_target_skips_analysis(self, mock_analysis, mock_activity, mock_log):
+        """When no target IP, analyze_evidence should NOT be called."""
+        result = run_investigation("Check general system activity")
+        mock_analysis.assert_not_called()
+        assert result["success"] is True
+        assert result["target_ip"] == "unknown"
+        assert "analyze_evidence" not in result["tools_used"]
+        assert result["errors"]["analysis"] is not None
+        assert "target" in result["errors"]["analysis"].lower()
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence")
+    def test_no_target_risk_is_unknown(self, mock_analysis, mock_activity, mock_log):
+        """Without target-specific analysis, risk should be UNKNOWN."""
+        result = run_investigation("Check general system activity")
+        assert result["risk_score"]["score"] is None
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["containment_allowed"] is False
+
+
+# ===========================================================================
 # 10. Risk-score exception handling
 # ===========================================================================
 class TestRiskScoreFailure:
@@ -516,8 +562,10 @@ class TestPartialFailures:
         assert result["success"] is True
         assert result["status"] == "partial"
         assert result["evidence_complete"] is False
-        # Risk score should still be computed from log+activity
-        assert result["risk_score"]["score"] >= 0
+        # Without target-specific analysis, risk is UNKNOWN
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["risk_score"]["score"] is None
+        assert result["containment_allowed"] is False
 
     @patch("agent.search_security_logs", side_effect=FAKE_TOOL_ERROR)
     @patch("agent.check_system_activity", side_effect=FAKE_TOOL_ERROR)
@@ -555,7 +603,28 @@ class TestPartialFailures:
         assert "search_security_logs" in result["tools_used"]
         assert "check_system_activity" in result["tools_used"]
         assert "analyze_evidence" not in result["tools_used"]
-        assert "risk_score" in result["tools_used"]
+        # Risk score is UNKNOWN (no target-specific analysis) → not in tools_used
+        assert "risk_score" not in result["tools_used"]
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    def test_unsupported_target_risk_unknown(self, mock_c, mock_l):
+        """Unsupported target should get UNKNOWN risk, not fabricated LOW."""
+        mock_analysis_result = {
+            "success": False,
+            "error": "Correlated evidence is only available for 10.0.0.25",
+            "findings": [],
+            "risk_indicators": {},
+        }
+        with patch("agent.analyze_evidence", return_value=mock_analysis_result):
+            result = run_investigation("Investigate 192.168.1.50")
+        assert result["success"] is True
+        assert result["target_ip"] == "192.168.1.50"
+        # Risk should be UNKNOWN — not LOW from raw fallback
+        assert result["risk_score"]["score"] is None
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["containment_allowed"] is False
+        assert "analyze_evidence" not in result["tools_used"]
 
     @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
     @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
@@ -596,7 +665,9 @@ class TestMalformedResults:
         """A successful tool response must not bypass value-type validation."""
         result = run_investigation("Investigate 10.0.0.25")
         assert result["success"] is True
-        assert result["risk_score"]["score"] == 30
+        # Analysis has no risk_indicators (None) → risk_indicators stays empty
+        assert result["risk_score"]["score"] == 0
+        assert result["risk_score"]["level"] == "LOW"
         assert result["evidence"] == [
             "Unusual network connections: 1 connection(s) to non-standard ports"
         ]
@@ -927,6 +998,7 @@ def run_all():
         TestSysExecutable,
         TestBlockIpValidation,
         TestAnalyzeEvidenceDependencies,
+        TestNoTargetAnalysis,
     ]
 
     for cls in test_classes:

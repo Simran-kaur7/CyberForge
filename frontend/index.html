@@ -225,7 +225,9 @@
       // Only include sessions that actually have a risk_score (not null/undefined)
       const riskScores = active.map(s => {
         if (s.risk_score && typeof s.risk_score === 'object') {
-          const n = Number(s.risk_score.score);
+          const raw = s.risk_score.score;
+          if (raw === null || raw === undefined) return null;
+          const n = Number(raw);
           return Number.isFinite(n) ? n : null;
         }
         if (s.risk_score !== null && s.risk_score !== undefined) {
@@ -247,8 +249,11 @@
         var riskScore = null;
         var riskLevel = 'unknown';
         if (s.risk_score && typeof s.risk_score === 'object') {
-          const n = Number(s.risk_score.score);
-          riskScore = Number.isFinite(n) ? n : null;
+          const raw = s.risk_score.score;
+          if (raw !== null && raw !== undefined) {
+            const n = Number(raw);
+            riskScore = Number.isFinite(n) ? n : null;
+          }
           riskLevel = (s.risk_score.level || 'MEDIUM').toLowerCase();
         } else if (s.risk_score !== null && s.risk_score !== undefined) {
           const n = Number(s.risk_score);

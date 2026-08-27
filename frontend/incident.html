@@ -734,7 +734,6 @@
         sessions.forEach(function (s) {
           if (s.id === sessionId) return; // skip current
           var li = document.createElement('li');
-          var li = document.createElement('li');
           var idSpan = document.createElement('span');
           idSpan.className = 'id';
           idSpan.textContent = s.incident_id || s.id;
@@ -752,6 +751,7 @@
           li.appendChild(idSpan);
           li.appendChild(statusSpan);
           li.appendChild(reopenBtn);
+          list.appendChild(li);
         });
       })
       .catch(function () {

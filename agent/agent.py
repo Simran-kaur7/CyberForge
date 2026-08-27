@@ -32,10 +32,14 @@ else:
 # Default known-bad IPs for the demo
 KNOWN_BAD_IPS = ["10.0.0.25"]
 
-# IPv4 pattern: four dot-separated groups of 1-3 digits.
-# No anchors here so search() can find an IP inside a longer query.
+# IPv4 pattern: four dot-separated groups of 1-3 digits, surrounded
+# by word boundaries so that "10.0.0.25.99" does NOT match "10.0.0.25".
 # _validate_ip() uses fullmatch() for strict matching.
-_IPV4_PATTERN = re.compile(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})")
+_IPV4_PATTERN = re.compile(
+    r"(?<![\d.])"
+    r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})"
+    r"(?!\d|\.)"
+)
 
 # Maximum findings returned in the result
 _MAX_FINDINGS = 10
@@ -200,33 +204,35 @@ def run_investigation(query: str, target_ip: str | None = None) -> dict:
     except Exception as exc:
         activity_error = _sanitize_exception(exc)
 
-    # Step 3: Correlate evidence. Pass the known target through so the
-    # analyzer cannot silently analyze a different target and relabel it.
-    # When no target is known, preserve the analyzer's legacy demo/default
-    # behavior by calling it without an argument.
+    # Step 3: Correlate evidence.
+    # When no target IP is known, do NOT call analyze_evidence — the
+    # analyzer only has evidence for the demo IP (10.0.0.25) and calling
+    # it without a target would silently analyze 10.0.0.25 for a
+    # targetless query.
     analysis_result = None
     analysis_error = None
     analysis_mismatch = False
-    try:
-        if target_ip:
+    if target_ip:
+        try:
             analysis_result = analyze_evidence(target_ip)
-        else:
-            analysis_result = analyze_evidence()
-    except Exception as exc:
-        analysis_error = _sanitize_exception(exc)
+        except Exception as exc:
+            analysis_error = _sanitize_exception(exc)
 
-    # Defense-in-depth: reject any analysis whose source does not match the
-    # requested target, even though the analyzer now receives the target.
-    if (analysis_result and isinstance(analysis_result, dict)
-            and target_ip and target_ip != "unknown"):
-        analysis_source_ip = analysis_result.get("source_ip", "")
-        if analysis_source_ip and analysis_source_ip != target_ip:
-            analysis_mismatch = True
-            analysis_error = (
-                "Analysis results are for a different target "
-                f"({analysis_source_ip}) and were discarded"
-            )
-            analysis_result = None
+        # Defense-in-depth: reject any analysis whose source does not
+        # match the requested target.
+        if analysis_result and isinstance(analysis_result, dict):
+            analysis_source_ip = analysis_result.get("source_ip", "")
+            if analysis_source_ip and analysis_source_ip != target_ip:
+                analysis_mismatch = True
+                analysis_error = (
+                    "Analysis results are for a different target "
+                    f"({analysis_source_ip}) and were discarded"
+                )
+                analysis_result = None
+    else:
+        analysis_error = (
+            "No target IP provided — correlated analysis requires a target"
+        )
 
     # Determine which tools succeeded — require valid structural evidence
     log_ok = _validate_tool_result(log_result, "search_security_logs")
@@ -254,41 +260,27 @@ def run_investigation(query: str, target_ip: str | None = None) -> dict:
     # --- Case B: partial evidence ---
     evidence_complete = tools_succeeded == 3
 
-    # Step 4: Build risk indicators from tool results
+    # Step 4: Build risk indicators from tool results.
+    # When a specific target was requested but analysis failed (e.g.
+    # unsupported IP), do NOT fabricate risk from raw system-wide data —
+    # that would produce misleading LOW risk for the wrong target.
+    # Step 4: Build risk indicators.
+    # Risk scoring REQUIRES target-specific correlated evidence from
+    # analyze_evidence().  Without it, risk is UNKNOWN — we must NOT
+    # fabricate target-specific risk from raw system-wide log/activity
+    # data, as that would produce misleading risk assessments for the
+    # wrong target.
     risk_indicators = {}
+    target_analysis_missing = not analysis_ok
 
-    if (analysis_ok and isinstance(analysis_result, dict)
-            and isinstance(analysis_result.get("risk_indicators"), dict)):
-        risk_indicators = dict(analysis_result["risk_indicators"])
-        # Override source_ip with actual target — analysis may have hardcoded value
-        if target_ip and risk_indicators.get("source_ip") != target_ip:
-            risk_indicators["source_ip"] = target_ip
-    elif log_ok and activity_ok:
-        # Fallback: build indicators from raw results
-        risk_indicators = {
-            "failed_attempts": _safe_count(log_result.get("failed_logins")),
-            "successful_suspicious_login": _safe_count(log_result.get("successful_logins")) > 0,
-            "suspicious_process": _safe_count(activity_result.get("suspicious_process_count")) > 0,
-            "unusual_connection": _safe_count(activity_result.get("unusual_connection_count")) > 0,
-            "source_ip": target_ip or "unknown",
-        }
-    else:
-        # Partial evidence: build what we can from available results
-        if log_ok and isinstance(log_result, dict):
-            risk_indicators["failed_attempts"] = _safe_count(log_result.get("failed_logins"))
-            risk_indicators["successful_suspicious_login"] = (
-                _safe_count(log_result.get("successful_logins")) > 0
-            )
-            risk_indicators["source_ip"] = target_ip or "unknown"
-        if activity_ok and isinstance(activity_result, dict):
-            risk_indicators["suspicious_process"] = (
-                _safe_count(activity_result.get("suspicious_process_count")) > 0
-            )
-            risk_indicators["unusual_connection"] = (
-                _safe_count(activity_result.get("unusual_connection_count")) > 0
-            )
-            if "source_ip" not in risk_indicators:
-                risk_indicators["source_ip"] = target_ip or "unknown"
+    if analysis_ok and isinstance(analysis_result, dict):
+        raw_indicators = analysis_result.get("risk_indicators")
+        if isinstance(raw_indicators, dict):
+            risk_indicators = dict(raw_indicators)
+            # Override source_ip with actual target — analysis may have
+            # a hardcoded value.
+            if target_ip and risk_indicators.get("source_ip") != target_ip:
+                risk_indicators["source_ip"] = target_ip
 
     # Step 5: Compute risk score with exception handling
     risk_score = None
@@ -297,6 +289,22 @@ def run_investigation(query: str, target_ip: str | None = None) -> dict:
         risk_score = compute_risk_score(risk_indicators, KNOWN_BAD_IPS)
     except Exception as exc:
         risk_score_error = _sanitize_exception(exc)
+
+    # When target-specific analysis is unavailable, the risk score
+    # must be UNKNOWN — a score of 0/LOW from empty indicators would
+    # be misleading.
+    if target_analysis_missing:
+        risk_score = {
+            "score": None,
+            "level": "UNKNOWN",
+            "max_score": 100,
+            "breakdown": {},
+            "error": (
+                "Target-specific correlated analysis is not available; "
+                "risk cannot be assessed"
+            ),
+        }
+        risk_score_error = None
 
     risk_score_failed = risk_score is None
     if risk_score_failed:

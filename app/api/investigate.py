@@ -10,6 +10,11 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from agent.agent import run_investigation, _validate_ip
+from app.sdk_client import (
+    create_session,
+    find_session_by_incident,
+    update_session,
+)
 
 
 router = APIRouter(prefix="/api", tags=["investigate"])
@@ -67,5 +72,35 @@ def investigate(body: InvestigationRequest):
             status_code=502,
             detail="Investigation produced no results.",
         )
+
+    # --- Create or reuse a local session for this investigation ---
+    # This gives the frontend a session_id needed for the approval lifecycle.
+    incident_id = result.get("query", "INC-UNKNOWN")[:50]
+    existing = find_session_by_incident(incident_id)
+    if existing:
+        local_session = existing
+    else:
+        local_session = create_session(
+            incident_id,
+            evidence_snapshot=result.get("tool_results", {}),
+        )
+
+    # Persist investigation evidence into the session
+    update_result = update_session(
+        local_session["id"],
+        evidence_snapshot=result.get("tool_results", {}),
+        risk_score=result.get("risk_score"),
+    )
+    if not update_result.get("success"):
+        # Log but do not fail the investigation — the result is still valid
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to update session %s: %s",
+            local_session["id"],
+            update_result.get("error", "unknown"),
+        )
+
+    result["session_id"] = local_session["id"]
+    result["incident_id"] = incident_id
 
     return result
