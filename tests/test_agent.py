@@ -1078,6 +1078,346 @@ class TestAnalyzeEvidenceDependencies:
 
 
 # ===========================================================================
+# 18. Bug #2 regression — no target must not return demo log evidence
+# ===========================================================================
+class TestNoTargetNoDemoEvidence:
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence")
+    def test_no_target_skips_log_search(self, mock_analysis, mock_activity, mock_log):
+        """When there is no target IP, search_security_logs must NOT be called.
+        The demo log dataset is IP-scoped and returns 10.0.0.25 entries,
+        which would be misidentified as evidence about an unknown target."""
+        result = run_investigation("Check general system activity")
+        mock_log.assert_not_called()
+        assert result["target_ip"] == "unknown"
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["containment_allowed"] is False
+        assert "search_security_logs" not in result["tools_used"]
+        # Evidence must not contain demo-specific SSH login counts
+        evidence_str = ", ".join(result["evidence"])
+        assert "failed SSH login" not in evidence_str
+        assert "45" not in evidence_str
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence")
+    def test_no_target_risk_not_from_demo(self, mock_analysis, mock_activity, mock_log):
+        """Risk must be UNKNOWN when no target — never derived from demo data."""
+        result = run_investigation("Check general system activity")
+        assert result["risk_score"]["score"] is None
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert "risk_score" not in result["tools_used"]
+        assert result["containment_allowed"] is False
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence")
+    def test_no_target_findings_empty(self, mock_analysis, mock_activity, mock_log):
+        """Without target-specific analysis, findings must be empty."""
+        result = run_investigation("Check general system activity")
+        assert result["findings"] == []
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence")
+    def test_no_target_target_ip_preserved(self, mock_analysis, mock_activity, mock_log):
+        """target_ip must be 'unknown', never silently set to 10.0.0.25."""
+        result = run_investigation("Check general system activity")
+        assert result["target_ip"] == "unknown"
+        assert "10.0.0.25" not in result.get("target_ip", "")
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence")
+    def test_no_target_analysis_error_explains(self, mock_analysis, mock_activity, mock_log):
+        """The analysis error must explain why correlated analysis was skipped."""
+        result = run_investigation("Check general system activity")
+        assert result["errors"]["analysis"] is not None
+        assert "target" in result["errors"]["analysis"].lower()
+
+
+# ===========================================================================
+# 19. Bug #3 regression — unsupported target gets UNKNOWN, not LOW
+# ===========================================================================
+class TestUnsupportedTargetRisk:
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence", return_value={
+        "success": False,
+        "error": "Evidence only available for 10.0.0.25",
+        "findings": [],
+        "risk_indicators": {},
+    })
+    def test_unsupported_ip_risk_unknown(self, mock_a, mock_c, mock_l):
+        """An unsupported IP must get UNKNOWN risk, never fabricated LOW."""
+        result = run_investigation("Investigate 192.168.1.50")
+        assert result["success"] is True
+        assert result["target_ip"] == "192.168.1.50"
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["risk_score"]["score"] is None
+        assert result["containment_allowed"] is False
+        assert "analyze_evidence" not in result["tools_used"]
+        assert "risk_score" not in result["tools_used"]
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence", return_value={
+        "success": True,
+        "source_ip": "10.0.0.25",
+        "findings": ["test"],
+        "risk_indicators": {},
+    })
+    def test_empty_indicators_unknown_risk(self, mock_a, mock_c, mock_l):
+        """Successful analysis with empty indicators must yield UNKNOWN, not 0."""
+        result = run_investigation("Investigate 10.0.0.25")
+        # Empty indicators fail _validate_tool_result → analysis discarded
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["risk_score"]["score"] is None
+        assert result["containment_allowed"] is False
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence", return_value={
+        "success": True,
+        "source_ip": "10.0.0.25",
+        "risk_indicators": None,
+        "findings": [],
+    })
+    def test_malformed_indicators_unknown_risk(self, mock_a, mock_c, mock_l):
+        """Non-dict indicators must yield UNKNOWN, not crash or score 0."""
+        result = run_investigation("Investigate 10.0.0.25")
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["risk_score"]["score"] is None
+        assert result["containment_allowed"] is False
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    def test_malformed_ip_gets_unknown_risk(self, mock_c, mock_l):
+        """A malformed explicit target_ip must be rejected, not truncated."""
+        result = run_investigation("Test", target_ip="10.0.0.25.99")
+        assert result["success"] is False
+        assert result["status"] == "error"
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    def test_over255_octet_rejected(self, mock_c, mock_l):
+        """IPs with octets > 255 must be rejected."""
+        result = run_investigation("Test", target_ip="999.0.0.1")
+        assert result["success"] is False
+        assert result["status"] == "error"
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    def test_no_false_containment_for_unsupported(self, mock_c, mock_l):
+        """Containment must be disallowed for any unsupported target."""
+        for ip in ("192.168.1.50", "172.16.0.1", "8.8.8.8"):
+            with patch("agent.analyze_evidence", return_value={
+                "success": False,
+                "error": "not supported",
+                "findings": [],
+                "risk_indicators": {},
+            }):
+                result = run_investigation(f"Investigate {ip}")
+            assert result["containment_allowed"] is False, f"Containment allowed for {ip}"
+            assert result["risk_score"]["level"] == "UNKNOWN", f"Risk not UNKNOWN for {ip}"
+
+
+# ===========================================================================
+# 20. Bug #4 regression — malformed IP not truncated
+# ===========================================================================
+class TestMalformedIpNotTruncated:
+    def test_trailing_octets_not_extracted(self):
+        """'10.0.0.25.99' must NOT yield '10.0.0.25'."""
+        assert extract_target_ip("Check 10.0.0.25.99") is None
+
+    def test_suffixed_ip_not_extracted(self):
+        """'10.0.0.25abc' must NOT yield '10.0.0.25'."""
+        assert extract_target_ip("Check 10.0.0.25abc") is None
+
+    def test_leading_digit_prefix_rejected(self):
+        """'910.0.0.25' must NOT yield '10.0.0.25'."""
+        assert extract_target_ip("Check 910.0.0.25") is None
+
+    def test_valid_ip_still_extracted(self):
+        """A genuine IP in free text must still be found."""
+        assert extract_target_ip("Investigate 10.0.0.25") == "10.0.0.25"
+        assert extract_target_ip("Check 192.168.1.100 now") == "192.168.1.100"
+
+    def test_multiple_ips_first_valid(self):
+        """When multiple IPs appear, the first valid one is returned."""
+        result = extract_target_ip("Check 10.0.0.25 and 192.168.1.1")
+        assert result == "10.0.0.25"
+
+    def test_explicit_malformed_target_ip_rejected(self):
+        """A malformed target_ip parameter must be rejected, not truncated."""
+        result = run_investigation("Test", target_ip="10.0.0.25.99")
+        assert result["success"] is False
+        assert result["status"] == "error"
+        assert "Invalid target_ip" in result["error"]
+
+    def test_explicit_5_octet_rejected(self):
+        """10.0.0.1.5 must be rejected as too many octets."""
+        assert _validate_ip("10.0.0.1.5") is False
+
+    def test_256_octet_rejected(self):
+        """256.1.1.1 must be rejected for octet > 255."""
+        assert _validate_ip("256.1.1.1") is False
+
+    def test_incomplete_ip_rejected(self):
+        """10.0.0 must be rejected as incomplete."""
+        assert _validate_ip("10.0.0") is False
+
+
+# ===========================================================================
+# 21. Bug #5 regression — null risk not converted to zero
+# ===========================================================================
+class TestNullRiskNotZero:
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence", return_value=FAKE_ANALYSIS_SUCCESS)
+    def test_successful_risk_has_numeric_score(self, mock_a, mock_c, mock_l):
+        """A successful investigation must have a numeric score."""
+        result = run_investigation("Investigate 10.0.0.25")
+        score = result["risk_score"]["score"]
+        assert isinstance(score, (int, float))
+        assert score > 0
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence", return_value=FAKE_ANALYSIS_SUCCESS)
+    @patch("agent.compute_risk_score", side_effect=RuntimeError("crash"))
+    def test_risk_failure_score_is_none(self, mock_score, mock_a, mock_c, mock_l):
+        """When risk scoring fails, score must be None, not 0."""
+        result = run_investigation("Investigate 10.0.0.25")
+        assert result["risk_score"]["score"] is None
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["containment_allowed"] is False
+        # Must NOT be 0 or LOW
+        assert result["risk_score"]["score"] != 0
+        assert result["severity"] != "LOW"
+
+    def test_no_target_risk_score_none(self):
+        """Without target, risk_score.score must be None, never 0."""
+        with patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS), \
+             patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS), \
+             patch("agent.analyze_evidence") as mock_a:
+            result = run_investigation("Check system activity")
+        assert result["risk_score"]["score"] is None
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["severity"] == "UNKNOWN"
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence", return_value=FAKE_ANALYSIS_SUCCESS)
+    def test_known_bad_ip_has_high_score(self, mock_a, mock_c, mock_l):
+        """Known-bad IP must get a high risk score with breakdown."""
+        result = run_investigation("Investigate 10.0.0.25")
+        score = result["risk_score"]["score"]
+        assert score is not None
+        assert score > 0
+        assert "breakdown" in result["risk_score"]
+        assert len(result["risk_score"]["breakdown"]) > 0
+
+
+# ===========================================================================
+# 22. Bug #6 regression — sessions persist and are listable
+# ===========================================================================
+class TestSessionPersistenceCompleteness:
+    def test_two_sessions_both_listed(self):
+        """Creating two sessions must result in both appearing in list_sessions."""
+        import tempfile
+        from pathlib import Path
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                s1 = sdk_client.create_session("INC-A")
+                s2 = sdk_client.create_session("INC-B")
+                sessions = sdk_client.list_sessions()
+                ids = [s["id"] for s in sessions]
+                assert s1["id"] in ids, "First session missing from list"
+                assert s2["id"] in ids, "Second session missing from list"
+                assert len(sessions) == 2
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
+    def test_investigate_session_appears_in_list(self):
+        """A session created via investigate() must appear in list_sessions."""
+        import tempfile
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                fake = {
+                    "success": True, "status": "complete",
+                    "evidence_complete": True, "query": "test",
+                    "target_ip": "10.0.0.25", "severity": "HIGH",
+                    "risk_score": {"score": 80, "level": "HIGH", "max_score": 100, "breakdown": {}},
+                    "findings": [], "evidence": [], "tools_used": [],
+                    "recommendation": "test", "containment_allowed": True,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation", return_value=fake):
+                    result = investigate(InvestigationRequest(
+                        query="Investigate 10.0.0.25", incident_id="INC-INV-1"
+                    ))
+                sessions = sdk_client.list_sessions()
+                session_ids = [s["id"] for s in sessions]
+                assert result["session_id"] in session_ids, \
+                    "investigate-created session not found in list_sessions"
+                assert len(sessions) >= 1
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
+    def test_reinvestigation_persists_and_survives(self):
+        """Re-investigating the same incident must persist and be readable."""
+        import tempfile
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                fake = {
+                    "success": True, "status": "complete",
+                    "evidence_complete": True, "query": "test",
+                    "target_ip": "10.0.0.25", "severity": "HIGH",
+                    "risk_score": {"score": 80, "level": "HIGH", "max_score": 100, "breakdown": {}},
+                    "findings": [], "evidence": [], "tools_used": [],
+                    "recommendation": "test", "containment_allowed": True,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation", return_value=fake):
+                    r1 = investigate(InvestigationRequest(
+                        query="Investigate 10.0.0.25", incident_id="INC-REINV"
+                    ))
+                    r2 = investigate(InvestigationRequest(
+                        query="Investigate 10.0.0.25", incident_id="INC-REINV"
+                    ))
+                # Same incident+target → session reused
+                assert r1["session_id"] == r2["session_id"]
+                # Session is still in the list
+                sessions = sdk_client.list_sessions()
+                ids = [s["id"] for s in sessions]
+                assert r1["session_id"] in ids
+                # Session is still readable
+                sess = sdk_client.get_session(r1["session_id"])
+                assert sess is not None
+                assert sess["incident_id"] == "INC-REINV"
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
+
+# ===========================================================================
 #  Run all
 # ===========================================================================
 def run_all():
@@ -1104,6 +1444,11 @@ def run_all():
         TestBlockIpValidation,
         TestAnalyzeEvidenceDependencies,
         TestNoTargetAnalysis,
+        TestNoTargetNoDemoEvidence,
+        TestUnsupportedTargetRisk,
+        TestMalformedIpNotTruncated,
+        TestNullRiskNotZero,
+        TestSessionPersistenceCompleteness,
     ]
 
     for cls in test_classes:

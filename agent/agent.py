@@ -36,9 +36,9 @@ KNOWN_BAD_IPS = ["10.0.0.25"]
 # by word boundaries so that "10.0.0.25.99" does NOT match "10.0.0.25".
 # _validate_ip() uses fullmatch() for strict matching.
 _IPV4_PATTERN = re.compile(
-    r"(?<![\d.])"
+    r"(?<![a-zA-Z0-9_.])"
     r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})"
-    r"(?!\d|\.)"
+    r"(?![a-zA-Z0-9_.])"
 )
 
 # Maximum findings returned in the result
@@ -229,13 +229,21 @@ def run_investigation(query: str, target_ip: str | None = None) -> dict:
     if not target_ip:
         target_ip = extract_target_ip(query)
 
-    # Step 1: Run security log search
+    # Step 1: Run security log search.
+    # The log dataset is IP-scoped (contains only 10.0.0.25 entries), so
+    # running a search without a target would return all demo entries and
+    # present them as target-specific evidence for an unknown target.
     log_result = None
     log_error = None
-    try:
-        log_result = search_security_logs(target_ip or "")
-    except Exception as exc:
-        log_error = _sanitize_exception(exc)
+    if target_ip:
+        try:
+            log_result = search_security_logs(target_ip)
+        except Exception as exc:
+            log_error = _sanitize_exception(exc)
+    else:
+        log_error = (
+            "No target IP provided — log search requires a target"
+        )
 
     # Step 2: Check system activity
     activity_result = None
