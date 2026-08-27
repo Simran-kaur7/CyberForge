@@ -152,9 +152,12 @@ def _load_sessions() -> list:
 def _save_sessions(sessions: list) -> None:
     """Atomically write sessions: write to a temp file, then rename."""
     import tempfile
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    sessions_dir = SESSIONS_FILE.parent
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
     tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=str(DATA_DIR), suffix=".tmp", prefix="sessions_"
+        dir=str(sessions_dir), suffix=".tmp", prefix="sessions_"
     )
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
