@@ -8,12 +8,55 @@ TrueForge create-turn returns an SSE stream. This module:
 Requires CYBERFORGE_API_KEY for containment decisions.
 """
 
+import logging
 import os
 import json
 import urllib.request
-from fastapi import APIRouter, HTTPException, Header
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
+
+try:
+    from fastapi import APIRouter, HTTPException, Header
+    from fastapi.responses import JSONResponse
+except ImportError:  # pragma: no cover - keeps local tests working without FastAPI
+    class HTTPException(Exception):
+        def __init__(self, status_code: int, detail: str):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    def Header(default=None):
+        return default
+
+    class JSONResponse(dict):
+        def __init__(self, content=None, status_code: int = 200):
+            super().__init__(content or {})
+            self.content = content or {}
+            self.status_code = status_code
+
+    class APIRouter:
+        def __init__(self, *args, **kwargs):
+            self.routes = []
+
+        def _decorator(self, *args, **kwargs):
+            def wrapper(func):
+                self.routes.append((args, kwargs, func))
+                return func
+            return wrapper
+
+        post = get = delete = _decorator
+
+try:
+    from pydantic import BaseModel
+except ImportError:  # pragma: no cover - lightweight fallback for tests
+    class BaseModel:
+        def __init__(self, **data):
+            for key, value in data.items():
+                setattr(self, key, value)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
 from typing import Optional
 
 
@@ -39,9 +82,21 @@ class DecisionRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class UncertainForwardingResolutionRequest(BaseModel):
+    session_id: str
+    action_id: str
+    confirmed_delivered: bool
+
+
 def _require_api_key(authorization: Optional[str] = Header(None)) -> str:
     if not EXPECTED_API_KEY:
-        return "analyst"
+        import logging
+        logging.warning(
+            "CYBERFORGE_API_KEY is not set — containment endpoints "
+            "are running without authentication.  This is only "
+            "safe for local development."
+        )
+        return "analyst-local-dev"
 
     if not authorization:
         raise HTTPException(
@@ -49,7 +104,20 @@ def _require_api_key(authorization: Optional[str] = Header(None)) -> str:
             detail="Missing Authorization header",
         )
 
-    token = authorization.replace("Bearer ", "").strip()
+    # Strict Bearer-token parsing: must be exactly "Bearer <token>"
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0] != "Bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Authorization header format; expected 'Bearer <token>'",
+        )
+
+    token = parts[1].strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Empty Bearer token",
+        )
 
     if token != EXPECTED_API_KEY:
         raise HTTPException(
@@ -139,7 +207,15 @@ def _tf_post_sse(path: str, body: dict) -> dict:
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"TrueForge returned HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
+        # Covers most network failures, including socket timeouts, since
+        # urllib wraps them here in most cases.
         raise RuntimeError("Cannot reach TrueForge") from exc
+    except (TimeoutError, OSError) as exc:
+        # Belt-and-suspenders: some timeout/connection failures (e.g. a bare
+        # socket.timeout/TimeoutError, ConnectionResetError) are not always
+        # wrapped in urllib.error.URLError depending on where they occur, so
+        # catch the broader OSError family explicitly and normalize it too.
+        raise RuntimeError("TrueForge request failed (network error)") from exc
 
 
 def _tf_get(path: str) -> dict:
@@ -159,14 +235,17 @@ def _tf_get(path: str) -> dict:
 
             return json.loads(raw)
 
-    except json.JSONDecodeError:
-        raise RuntimeError("TrueForge returned invalid JSON")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("TrueForge returned invalid JSON") from exc
 
-    except urllib.error.HTTPError:
-        raise RuntimeError("TrueForge returned an error")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError("TrueForge returned an error") from exc
 
-    except urllib.error.URLError:
-        raise RuntimeError("Cannot reach TrueForge")
+    except urllib.error.URLError as exc:
+        raise RuntimeError("Cannot reach TrueForge") from exc
+
+    except (TimeoutError, OSError) as exc:
+        raise RuntimeError("TrueForge request failed (network error)") from exc
 
 
 def _extract_identity_values(value) -> dict[str, set[str]]:
@@ -227,7 +306,14 @@ def request_containment_approval(
             set_approval_tool_call_id,
             persist_trueforge_session_id,
             release_forwarding_claim,
+            _release_forwarding_claim_locked,
+            complete_forwarding,
+            retry_approval_forwarding,
             release_request_claim,
+            mark_forwarding_dispatched,
+            mark_forwarding_uncertain,
+            _mark_forwarding_uncertain_locked,
+            forwarding_action_lock,
         )
 
         session = get_session(body.session_id)
@@ -342,20 +428,25 @@ def request_containment_approval(
                         },
                     )
 
-            except RuntimeError as exc:
-                # Release request claim upon failure so concurrent retries can run
+            except Exception:
+                # Release request claim upon failure so concurrent retries can run.
+                # Broadened beyond RuntimeError: TimeoutError, OSError, and any
+                # other unexpected failure during forwarding must not leave the
+                # request claim stuck, since that would strand the local action.
                 release_request_claim(local_session_id, action_id)
 
-                # Keep detailed exception context in server logs only.
-                print(
-                    f"TrueForge forward failed for session "
-                    f"{local_session_id}: {exc}"
+                # Keep detailed exception context (including traceback) in
+                # server logs only; the client only sees a generic message.
+                logger.exception(
+                    "TrueForge forward failed for session=%s action=%s",
+                    local_session_id,
+                    action_id,
                 )
 
-                # Keep the local approval pending so the same
-                # request can retry the TrueForge forward.
+                # Return success=false so the client knows the request was NOT
+                # forwarded, while keeping the local pending action retryable.
                 return {
-                    "success": True,
+                    "success": False,
                     "action_id": action_id,
                     "session_id": local_session_id,
                     "trueforge_session_id": tf_session_id,
@@ -363,31 +454,85 @@ def request_containment_approval(
                     "thread_id": None,
                     "analyst": analyst,
                     "trueforge_event": None,
-                    "trueforge_forward_error": "Failed to forward request to TrueForge; please retry.",
+                    "error": "Failed to forward request to TrueForge; please retry.",
                     "retryable": True,
                 }
 
         late_forward = None
+        forwarding_owner_token = None
 
         if tool_call_id:
-            cas_result = set_approval_tool_call_id(
-                local_session_id,
-                action_id,
-                tool_call_id,
-                thread_id=thread_id,
+            # Check if the action is already terminal (approved/rejected)
+            # — this is a retry of a previous late-forward failure.
+            session_data = get_session(local_session_id)
+            existing_action = None
+            if session_data:
+                for a in session_data.get("actions", []):
+                    if a.get("action_id") == action_id:
+                        existing_action = a
+                        break
+
+            is_retry = (
+                existing_action is not None
+                and existing_action.get("status") in ("approved", "rejected")
+                and existing_action.get("tool_call_id") == tool_call_id
+                and not existing_action.get("forwarded_to_trueforge")
             )
 
-            if not cas_result.get("success"):
-                raise HTTPException(
-                    status_code=409,
-                    detail=cas_result.get(
-                        "error",
-                        "Could not bind tool call",
-                    ),
+            if is_retry:
+                # Retry the original terminal action's forwarding.
+                retry_result = retry_approval_forwarding(
+                    local_session_id, action_id, tool_call_id,
+                )
+                if retry_result.get("success"):
+                    if retry_result.get("already_forwarding"):
+                        return {
+                            "success": True,
+                            "action_id": action_id,
+                            "session_id": local_session_id,
+                            "trueforge_session_id": tf_session_id,
+                            "tool_call_id": tool_call_id,
+                            "already_forwarding": True,
+                        }
+                    late_forward = retry_result
+                    forwarding_owner_token = retry_result.get("forwarding_owner")
+                elif retry_result.get("error"):
+                    # Forwarding already complete or action not retryable.
+                    raise HTTPException(
+                        status_code=409,
+                        detail=retry_result["error"],
+                    )
+            else:
+                # Normal path: bind tool_call_id and enter late-forward.
+                cas_result = set_approval_tool_call_id(
+                    local_session_id,
+                    action_id,
+                    tool_call_id,
+                    thread_id=thread_id,
                 )
 
-            if cas_result.get("pending_decision"):
-                late_forward = cas_result
+                if not cas_result.get("success"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=cas_result.get(
+                            "error",
+                            "Could not bind tool call",
+                        ),
+                    )
+
+                if cas_result.get("already_forwarding"):
+                    return {
+                        "success": True,
+                        "action_id": action_id,
+                        "session_id": local_session_id,
+                        "trueforge_session_id": tf_session_id,
+                        "tool_call_id": tool_call_id,
+                        "already_forwarding": True,
+                    }
+
+                if cas_result.get("pending_decision"):
+                    late_forward = cas_result
+                    forwarding_owner_token = cas_result.get("forwarding_owner")
 
         if late_forward and tf_session_id and tool_call_id:
             decision = late_forward["pending_decision"]
@@ -409,32 +554,125 @@ def request_containment_approval(
             if thread_id:
                 approval_input["thread_id"] = thread_id
 
-            try:
-                _tf_post_sse(
-                    f"/api/v1/sessions/{tf_session_id}/turns",
-                    {"input": [approval_input]},
+            with forwarding_action_lock(local_session_id, action_id):
+                # Durably record that a dispatch is about to be attempted
+                # *before* making the network call. This is what lets a
+                # restart after a crash tell "the POST may have gone out" apart
+                # from "the POST was never attempted" — see
+                # mark_forwarding_dispatched() for why this ordering matters.
+                dispatch_marked = mark_forwarding_dispatched(
+                    local_session_id, action_id, owner_token=forwarding_owner_token,
                 )
+                if not dispatch_marked.get("success"):
+                    # Another caller already reclaimed this lease — we no
+                    # longer own the claim, so we must not dispatch under it.
+                    raise HTTPException(
+                        status_code=409,
+                        detail=dispatch_marked.get(
+                            "error", "Forwarding claim was lost before dispatch",
+                        ),
+                    )
 
-            except RuntimeError as exc:
-                release_forwarding_claim(
-                    local_session_id,
-                    action_id,
-                    str(exc),
-                )
+                try:
+                    tf_event = _tf_post_sse(
+                        f"/api/v1/sessions/{tf_session_id}/turns",
+                        {"input": [approval_input]},
+                    )
 
-                return {
-                    "success": True,
-                    "action_id": action_id,
-                    "session_id": local_session_id,
-                    "trueforge_session_id": tf_session_id,
-                    "tool_call_id": tool_call_id,
-                    "thread_id": thread_id,
-                    "analyst": analyst,
-                    "trueforge_event": tf_event,
-                    "late_forward_failed": True,
-                    "retryable": True,
-                }
+                    event_type = tf_event.get("type") if isinstance(tf_event, dict) else None
+                    if event_type in ("turn.failed", "error"):
+                        # TrueForge explicitly reported that the turn failed.
+                        # This is a definite application-level failure, not an
+                        # ambiguous transport outcome, so the action is safely
+                        # retryable. The locked primitive avoids recursively
+                        # acquiring the already-held per-action fence.
+                        release_result = _release_forwarding_claim_locked(
+                            local_session_id,
+                            action_id,
+                            f"TrueForge reported {event_type}",
+                            owner_token=forwarding_owner_token,
+                        )
+                        if not release_result.get("success"):
+                            logger.error(
+                                "Could not release failed late-forward claim for "
+                                "session=%s action=%s: %s",
+                                local_session_id,
+                                action_id,
+                                release_result.get("error", "unknown error"),
+                            )
+                            raise HTTPException(
+                                status_code=409,
+                                detail=release_result.get(
+                                    "error", "Forwarding claim could not be released"
+                                ),
+                            )
+                        return {
+                            "success": False,
+                            "action_id": action_id,
+                            "session_id": local_session_id,
+                            "trueforge_session_id": tf_session_id,
+                            "tool_call_id": tool_call_id,
+                            "thread_id": thread_id,
+                            "analyst": analyst,
+                            "trueforge_event": tf_event,
+                            "error": "TrueForge reported that the approval delivery failed.",
+                            "retryable": True,
+                        }
 
+                    # TrueForge accepted the decision — finalize the
+                    # forwarding state so a crash-restart cannot re-forward.
+                    complete_forwarding(
+                        local_session_id, action_id,
+                        owner_token=forwarding_owner_token,
+                    )
+
+                except HTTPException:
+                    raise
+                except Exception:
+                    # The dispatch marker was durably written immediately before the
+                    # POST. From this point onward, a timeout/reset/read failure may
+                    # mean TrueForge already accepted the decision. Do NOT release
+                    # the forwarding claim or clear forwarding_dispatched_at, or a
+                    # normal retry could submit the same decision twice.
+                    logger.exception(
+                        "Late-forward decision failed after dispatch for session=%s "
+                        "action=%s tool_call_id=%s",
+                        local_session_id,
+                        action_id,
+                        tool_call_id,
+                    )
+
+                    # We already hold the per-action fence. Use the fence-held
+                    # persistence primitive rather than mark_forwarding_uncertain(),
+                    # which would recursively acquire the same non-reentrant lock.
+                    mark_result = _mark_forwarding_uncertain_locked(
+                        local_session_id,
+                        action_id,
+                        "Late-forward decision outcome is uncertain",
+                        owner_token=forwarding_owner_token,
+                    )
+                    if not mark_result.get("success"):
+                        logger.error(
+                            "Could not persist uncertain forwarding state for session=%s "
+                            "action=%s: %s",
+                            local_session_id,
+                            action_id,
+                            mark_result.get("error", "unknown error"),
+                        )
+
+                    return {
+                        "success": False,
+                        "action_id": action_id,
+                        "session_id": local_session_id,
+                        "trueforge_session_id": tf_session_id,
+                        "tool_call_id": tool_call_id,
+                        "thread_id": thread_id,
+                        "analyst": analyst,
+                        "trueforge_event": tf_event,
+                        "error": "Late-forward decision outcome is uncertain; manual verification required.",
+                        "uncertain_delivery": True,
+                        "retryable": False,
+                    }
         return {
             "success": True,
             "action_id": action_id,
@@ -449,10 +687,10 @@ def request_containment_approval(
     except HTTPException:
         raise
 
-    except Exception as exc:
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=f"Approval request failed: {exc}",
+            detail="Approval request failed due to an internal error.",
         )
 
 
@@ -547,16 +785,27 @@ def _decide_containment(
                 body.reason,
                 thread_id,
             )
-        except RuntimeError as exc:
+        except Exception:
+            # Broadened beyond RuntimeError so a timeout, connection error, or
+            # any other unexpected failure still fails the decision instead of
+            # leaving it stuck mid-forward.
+            logger.exception(
+                "TrueForge decision forwarding failed for session=%s "
+                "action=%s tool_call_id=%s",
+                body.session_id,
+                body.action_id,
+                tool_call_id,
+            )
+
             fail_decision(
                 body.session_id,
                 body.action_id,
                 token,
-                str(exc),
+                "TrueForge decision forwarding failed",
             )
             raise HTTPException(
                 status_code=502,
-                detail=f"TrueForge decision forwarding failed: {exc}",
+                detail="TrueForge decision forwarding failed.",
             )
 
     completed = complete_decision(
@@ -606,9 +855,57 @@ def reject_containment(
         raise HTTPException(status_code=500, detail="Rejection failed")
 
 
+@router.post("/resolve-uncertain")
+def resolve_uncertain_approval_forwarding(
+    body: UncertainForwardingResolutionRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Resolve a post-dispatch TrueForge delivery outcome after operator verification."""
+    resolved_by = _require_api_key(authorization)
+    try:
+        from app.sdk_client import get_session, resolve_uncertain_forwarding
+
+        session = get_session(body.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        result = resolve_uncertain_forwarding(
+            body.session_id,
+            body.action_id,
+            body.confirmed_delivered,
+            resolved_by=resolved_by,
+        )
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=409,
+                detail=result.get("error", "Could not resolve uncertain forwarding"),
+            )
+
+        return {
+            **result,
+            "session_id": body.session_id,
+            "resolved_by": resolved_by,
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "Uncertain forwarding resolution failed for session=%s action=%s",
+            body.session_id,
+            body.action_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Uncertain forwarding resolution failed due to an internal error.",
+        )
+
+
 @router.get("/pending")
-def get_pending_approvals():
-    """List sessions with pending approval state from TrueForge."""
+def get_pending_approvals(
+    authorization: Optional[str] = Header(None),
+):
+    """List pending approval state; this is analyst-only information."""
+    _require_api_key(authorization)
     try:
         sessions = _tf_get("/api/v1/sessions")
 

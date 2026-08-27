@@ -94,7 +94,7 @@
   const emptyState = document.getElementById('empty-state');
   const activeCount = document.getElementById('active-count');
 
-  function riskWeight(r){ return Number(r) || 0; }
+  function riskWeight(r){ const n = Number(r); return Number.isFinite(n) ? n : 0; }
 
   function refreshList(){
     const q = searchInput.value.trim().toLowerCase();
@@ -122,59 +122,57 @@
 
   function rebindControls(){
     refreshList();
-    bindTiltAndCursor();
+    bindCardTilt();
+    bindReticle();
   }
 
   searchInput.addEventListener('input', refreshList);
   sortSelect.addEventListener('change', refreshList);
 
-  // ---- custom reticle cursor + tilt (rebindable for dynamic cards) ----
-  const reticle = document.getElementById('reticle');
+  // ---- custom reticle cursor ----
   const isCoarse = window.matchMedia('(pointer: coarse)').matches;
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const reticle = document.getElementById('reticle');
+  function bindReticle(){
+    if (isCoarse || !reticle) return;
+    document.querySelectorAll('button, a, .tilt-card, input, select').forEach(el=>{
+      if (el.dataset.reticleBound) return;
+      el.dataset.reticleBound = 'true';
+      el.addEventListener('mouseenter', ()=>{
+        reticle.classList.add('active');
+        if (el.closest('.risk-high, .risk-critical')) reticle.classList.add('risk');
+        else if (el.closest('.risk-low')) reticle.classList.add('ok');
+      });
+      el.addEventListener('mouseleave', ()=> reticle.classList.remove('active','risk','ok'));
+    });
+  }
   if (!isCoarse) {
     let mx=0,my=0,cx=0,cy=0;
     window.addEventListener('mousemove', e=>{ mx=e.clientX; my=e.clientY; });
     function loop(){ cx += (mx-cx)*0.22; cy += (my-cy)*0.22; reticle.style.transform = `translate(${cx}px,${cy}px)`; requestAnimationFrame(loop); }
     loop();
+    bindReticle();
   }
 
-  function bindTiltAndCursor(){
-    if (!isCoarse) {
-      // Cursor hover on all interactive elements
-      document.querySelectorAll('button, a, .tilt-card, input, select').forEach(el=>{
-        el.removeEventListener('mouseenter', el._enterH);
-        el.removeEventListener('mouseleave', el._leaveH);
-        el._enterH = function(){
-          reticle.classList.add('active');
-          if (el.querySelector && el.querySelector('.risk-high')) reticle.classList.add('risk');
-        };
-        el._leaveH = function(){ reticle.classList.remove('active','risk'); };
-        el.addEventListener('mouseenter', el._enterH);
-        el.addEventListener('mouseleave', el._leaveH);
+  // ---- 3D tilt on cards ----
+  function bindCardTilt(){
+    if (isCoarse || reduceMotion) return;
+    grid.querySelectorAll('.tilt-card').forEach(card => {
+      if (card.dataset.tiltBound) return;
+      card.dataset.tiltBound = 'true';
+      card.addEventListener('mousemove', e=>{
+        const r = card.getBoundingClientRect();
+        const x = e.clientX - r.left, y = e.clientY - r.top;
+        const rx = ((y / r.height) - 0.5) * -8;
+        const ry = ((x / r.width) - 0.5) * 8;
+        card.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
       });
-    }
-    // 3D tilt on cards
-    if (!isCoarse && !reduceMotion) {
-      document.querySelectorAll('.tilt-card').forEach(card => {
-        card.removeEventListener('mousemove', card._moveH);
-        card.removeEventListener('mouseleave', card._leaveH);
-        card._moveH = function(e){
-          const r = card.getBoundingClientRect();
-          const x = e.clientX - r.left, y = e.clientY - r.top;
-          const rx = ((y / r.height) - 0.5) * -8;
-          const ry = ((x / r.width) - 0.5) * 8;
-          card.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
-        };
-        card._leaveH = function(){
-          card.style.transform = 'perspective(900px) rotateX(0) rotateY(0) translateZ(0)';
-        };
-        card.addEventListener('mousemove', card._moveH);
-        card.addEventListener('mouseleave', card._leaveH);
+      card.addEventListener('mouseleave', ()=>{
+        card.style.transform = 'perspective(900px) rotateX(0) rotateY(0) translateZ(0)';
       });
-    }
+    });
   }
-  bindTiltAndCursor();
+  bindCardTilt();
 
   // ---- ambient ember particles ----
   const canvas = document.getElementById('emberCanvas');
@@ -226,8 +224,16 @@
       // Compute average risk score from active sessions
       // Only include sessions that actually have a risk_score (not null/undefined)
       const riskScores = active.map(s => {
-        if (s.risk_score && typeof s.risk_score === 'object') return s.risk_score.score;
-        if (s.risk_score !== null && s.risk_score !== undefined) return Number(s.risk_score);
+        if (s.risk_score && typeof s.risk_score === 'object') {
+          const raw = s.risk_score.score;
+          if (raw === null || raw === undefined) return null;
+          const n = Number(raw);
+          return Number.isFinite(n) ? n : null;
+        }
+        if (s.risk_score !== null && s.risk_score !== undefined) {
+          const n = Number(s.risk_score);
+          return Number.isFinite(n) ? n : null;
+        }
         return null;
       }).filter(n => n !== null);
       const avgRisk = riskScores.length > 0 ? Math.round(riskScores.reduce((a,b)=>a+b,0) / riskScores.length) : '--';
@@ -240,15 +246,23 @@
         card.className = 'tilt-card';
         card.dataset.id = s.incident_id || s.id;
         card.dataset.desc = '';
-        var riskScore = 0;
-        var riskLevel = 'medium';
+        var riskScore = null;
+        var riskLevel = 'unknown';
         if (s.risk_score && typeof s.risk_score === 'object') {
-          riskScore = s.risk_score.score || 0;
+          const raw = s.risk_score.score;
+          if (raw !== null && raw !== undefined) {
+            const n = Number(raw);
+            riskScore = Number.isFinite(n) ? n : null;
+          }
           riskLevel = (s.risk_score.level || 'MEDIUM').toLowerCase();
-        } else if (s.risk_score) {
-          riskScore = Number(s.risk_score);
-          riskLevel = riskScore >= 80 ? 'critical' : riskScore >= 60 ? 'high' : riskScore >= 30 ? 'medium' : 'low';
+        } else if (s.risk_score !== null && s.risk_score !== undefined) {
+          const n = Number(s.risk_score);
+          riskScore = Number.isFinite(n) ? n : null;
+          if (riskScore !== null) {
+            riskLevel = riskScore >= 80 ? 'critical' : riskScore >= 60 ? 'high' : riskScore >= 30 ? 'medium' : 'low';
+          }
         }
+        var displayScore = riskScore;
         var createdTs = s.created_at ? new Date(s.created_at).getTime() : 0;
         card.dataset.risk = String(riskScore);
         card.dataset.created = String(createdTs);
@@ -264,11 +278,16 @@
         const row = document.createElement('div');
         row.className = 'row';
         const badge = document.createElement('span');
-        badge.className = 'risk-badge risk-' + riskLevel;
-        var hasAssessed = s.risk_score !== null && s.risk_score !== undefined;
-        badge.textContent = hasAssessed ? riskLevel.toUpperCase() + ' ' + riskScore : 'Unassessed';
+        var hasAssessed = displayScore !== null;
+        if (hasAssessed) {
+          badge.textContent = riskLevel.toUpperCase() + ' ' + displayScore;
+          badge.className = 'risk-badge risk-' + riskLevel;
+        } else {
+          badge.textContent = s.risk_score && s.risk_score.level ? s.risk_score.level.toUpperCase() : 'Unassessed';
+          badge.className = 'risk-badge';
+        }
         row.appendChild(badge);
-n        const btn = document.createElement('button');
+        const btn = document.createElement('button');
         btn.className = 'btn btn-open';
         btn.textContent = 'Open Incident \u2192';
         btn.addEventListener('click', function() { openIncident(s.incident_id || s.id); });
