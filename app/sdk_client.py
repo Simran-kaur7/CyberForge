@@ -246,14 +246,9 @@ def _read_sessions() -> list:
 
 def forwarding_lock_filename(sid: str, action_id: str) -> str:
     """Stable, filesystem-safe name for a per-action forwarding fence."""
-    raw = f"{sid}_{action_id}"
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", raw)
-    if not safe or safe in {".", ".."}:
-        safe = "action"
-    if len(safe) > 120:
-        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-        safe = f"{safe[:80]}_{digest}"
-    return f"{safe}.lock"
+    raw = f"{sid}\x1f{action_id}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"action_{digest}.lock"
 
 
 def forwarding_lock_path(sid: str, action_id: str) -> Path:
