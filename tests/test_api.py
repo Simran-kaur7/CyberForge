@@ -559,6 +559,225 @@ def run_all():
         with_temp_sessions(body)
     check("test_session_store_key_and_field_guards", t38)
 
+    # ------------------------------------------------------------------
+    # 39-48: Race condition regression tests
+    # ------------------------------------------------------------------
+
+    # 39: Reinvestigation rejected while decision_in_progress exists
+    def t39():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RACE-1")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            assert r["success"] is True
+            aid = r["action_id"]
+            # Simulate a decision being forwarded
+            pr = sdk_client.prepare_decision(sid, aid, "approved")
+            assert pr["success"] is True
+            # Reinvestigation must be blocked
+            ur = sdk_client.update_session(
+                sid, supersede_stale_approval=True,
+                evidence_snapshot={"replaced": True}
+            )
+            assert ur["success"] is False, "Reinvestigation must not proceed during decision forwarding"
+            assert ur.get("approval_in_progress") is True
+            # Session fields must NOT have been modified
+            sess = sdk_client.get_session(sid)
+            assert sess["evidence_snapshot"] == {}, "Session was mutated despite blocked supersession"
+            # Approval must still be pending with decision_in_progress intact
+            assert sess["approval_state"]["status"] == "pending"
+            assert sess["approval_state"].get("decision_in_progress") is not None
+    check("test_reinvestigation_rejected_with_decision_in_progress", t39)
+
+    # 40: Reinvestigation rejected while request_in_flight exists
+    def t40():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RACE-2")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            assert r["success"] is True
+            # Approval was created with request_in_flight=True by request_approval
+            # Reinvestigation must be blocked
+            ur = sdk_client.update_session(
+                sid, supersede_stale_approval=True,
+                evidence_snapshot={"replaced": True}
+            )
+            assert ur["success"] is False, "Reinvestigation must not proceed while request is in flight"
+            assert ur.get("approval_in_progress") is True
+            sess = sdk_client.get_session(sid)
+            assert sess["evidence_snapshot"] == {}, "Session was mutated despite blocked supersession"
+            assert sess["approval_state"]["status"] == "pending"
+    check("test_reinvestigation_rejected_with_request_in_flight", t40)
+
+    # 41: Stale action cannot receive a tool_call_id
+    def t41():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RACE-3")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            # Simulate reinvestigation superseding (no active operation, so it succeeds)
+            sdk_client.release_request_claim(sid, aid)  # Clear request_in_flight
+            ur = sdk_client.update_session(
+                sid, supersede_stale_approval=True,
+                evidence_snapshot={"new": True}
+            )
+            assert ur["success"] is True
+            assert ur.get("superseded_action_id") == aid
+            # Late TrueForge response tries to bind tool_call_id
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tf-call-123")
+            assert br["success"] is False, "Must not bind tool_call_id to superseded action"
+            assert "superseded" in br["error"]
+    check("test_stale_action_rejects_tool_call_id_binding", t41)
+
+    # 42: Terminal (approved/rejected) action cannot receive a tool_call_id
+    def t42():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RACE-4")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            # Approve the action
+            ar = sdk_client.approve_action(sid, aid)
+            assert ar["status"] == "approved"
+            # Late TrueForge response tries to bind
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tf-call-456")
+            assert br["success"] is False, "Must not bind tool_call_id to approved action"
+            assert "approved" in br["error"]
+    check("test_terminal_action_rejects_tool_call_id_binding", t42)
+
+    # 43: Pending approval remains intact after rejected reinvestigation
+    def t43():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RACE-5")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            pr = sdk_client.prepare_decision(sid, aid, "approved")
+            assert pr["success"] is True
+            # Reinvestigation is blocked
+            sdk_client.update_session(sid, supersede_stale_approval=True, evidence_snapshot={"x": 1})
+            # Approval is fully intact
+            sess = sdk_client.get_session(sid)
+            ap = sess["approval_state"]
+            assert ap["action_id"] == aid
+            assert ap["status"] == "pending"
+            assert ap.get("decision_in_progress") is not None
+            # Decision can still be completed
+            token = pr["token"]
+            cr = sdk_client.complete_decision(sid, aid, token)
+            assert cr["success"] is True
+            assert cr["status"] == "approved"
+    check("test_pending_approval_survives_rejected_reinvestigation", t43)
+
+    # 44: Normal reinvestigation still works when no approval is active
+    def t44():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RACE-6", evidence_snapshot={"old": True})
+            sid = s["id"]
+            ur = sdk_client.update_session(
+                sid, supersede_stale_approval=True,
+                evidence_snapshot={"new": True}
+            )
+            assert ur["success"] is True
+            sess = sdk_client.get_session(sid)
+            assert sess["evidence_snapshot"] == {"new": True}
+            assert sess["approval_state"] is None
+    check("test_normal_reinvestigation_no_active_approval", t44)
+
+    # 45: Normal approval flow still works end-to-end
+    def t45():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RACE-7")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            pr = sdk_client.prepare_decision(sid, aid, "approved")
+            assert pr["success"] is True
+            cr = sdk_client.complete_decision(sid, aid, pr["token"])
+            assert cr["success"] is True
+            assert cr["status"] == "approved"
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["status"] == "approved"
+    check("test_normal_approval_flow_e2e", t45)
+
+    # 46: Failed TrueForge forwarding remains retryable
+    def t46():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RACE-8")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            pr = sdk_client.prepare_decision(sid, aid, "approved")
+            assert pr["success"] is True
+            # TrueForge forwarding fails
+            fr = sdk_client.fail_decision(sid, aid, pr["token"], "network timeout")
+            assert fr["success"] is True
+            assert fr["retryable"] is True
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["status"] == "pending"
+            assert sess["approval_state"].get("forward_error") == "network timeout"
+    check("test_failed_forwarding_remains_retryable", t46)
+
+    # 47: Duplicate live approval requests blocked
+    def t47():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RACE-9")
+            sid = s["id"]
+            r1 = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            assert r1["success"] is True
+            # Second request with same incident_id while first is pending
+            r2 = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            assert r2["success"] is False, "Second request must be blocked"
+            # Second request with different incident_id
+            r3 = sdk_client.request_approval(sid, "ISOLATE_HOST", {"incident_id": "OTHER"})
+            assert r3["success"] is False, "Different incident_id request must also be blocked"
+    check("test_duplicate_live_requests_blocked", t47)
+
+    # 48: _has_active_approval_operation helper correctness
+    def t48():
+        from app.sdk_client import _has_active_approval_operation
+        # No approval state
+        assert _has_active_approval_operation({}) is None
+        assert _has_active_approval_operation({"approval_state": None}) is None
+        # Terminal status
+        assert _has_active_approval_operation({
+            "approval_state": {"status": "approved", "action_id": "a"}
+        }) is None
+        assert _has_active_approval_operation({
+            "approval_state": {"status": "superseded", "action_id": "a"}
+        }) is None
+        # Pending with no active operation
+        assert _has_active_approval_operation({
+            "approval_state": {"status": "pending", "action_id": "a"}
+        }) is None
+        # Pending with decision_in_progress
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "decision_in_progress": {"decision": "approved", "token": "t"}
+            }
+        }) is not None
+        # Pending with request_in_flight
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True
+            }
+        }) is not None
+        # Pending with both active
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "decision_in_progress": {"decision": "approved"},
+                "request_in_flight": True
+            }
+        }) is not None
+    check("test_has_active_approval_operation", t48)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:

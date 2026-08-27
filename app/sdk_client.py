@@ -709,6 +709,22 @@ _REINVESTIGATION_SUPERSEDE_REASON = (
 )
 
 
+def _has_active_approval_operation(session: dict) -> str | None:
+    """Return a human-readable reason if the session has an in-flight
+    approval operation, or ``None`` if supersession is safe.
+
+    Must be called under the same session lock as the mutation it guards.
+    """
+    current = session.get("approval_state")
+    if not isinstance(current, dict) or current.get("status") != "pending":
+        return None
+    if current.get("decision_in_progress"):
+        return "An approval decision is currently being forwarded to TrueForge"
+    if current.get("request_in_flight"):
+        return "An approval request is currently in flight with TrueForge"
+    return None
+
+
 def _supersede_pending_approval(session: dict) -> str | None:
     """Retire a still-pending approval on ``session`` in place.
 
@@ -725,7 +741,13 @@ def _supersede_pending_approval(session: dict) -> str | None:
     can still be requested against the new evidence.
 
     Returns the retired action id, or ``None`` when there was nothing pending.
+    Raises ``RuntimeError`` if the approval has an active operation that must
+    complete before supersession is safe.
     """
+    block_reason = _has_active_approval_operation(session)
+    if block_reason:
+        raise RuntimeError(block_reason)
+
     current = session.get("approval_state")
     if not isinstance(current, dict) or current.get("status") != "pending":
         return None
@@ -769,6 +791,12 @@ def update_session(sid: str, *, supersede_stale_approval: bool = False, **kw) ->
     window in which a concurrent decision could authorize the stale call after
     the evidence has already changed. The retired action id, when any, is
     returned as ``superseded_action_id``.
+
+    If the approval has an active operation (``decision_in_progress`` or
+    ``request_in_flight``), the supersession is *blocked* and the update
+    fails with ``success=False`` and ``approval_in_progress=True`` so the
+    caller can report a controlled error. The session fields are not
+    modified.
     """
     if not sid or not isinstance(sid, str):
         return {"success": False, "error": "Session id is required"}
@@ -788,6 +816,18 @@ def update_session(sid: str, *, supersede_stale_approval: bool = False, **kw) ->
     def _update(sessions):
         for s in sessions:
             if isinstance(s, dict) and s.get("id") == sid:
+                # When supersession is requested, check for an active approval
+                # operation BEFORE modifying any fields so the check and the
+                # field merge are atomic within the same locked mutation.
+                if supersede_stale_approval:
+                    block_reason = _has_active_approval_operation(s)
+                    if block_reason:
+                        return {
+                            "success": False,
+                            "error": block_reason,
+                            "approval_in_progress": True,
+                        }
+
                 s.update(kw)
                 superseded_action_id = (
                     _supersede_pending_approval(s)
@@ -828,6 +868,16 @@ def set_approval_tool_call_id(
 
             if target is None:
                 return {"success": False, "error": "Action not found"}
+
+            target_status = target.get("status")
+            if target_status in ("superseded", "approved", "rejected"):
+                return {
+                    "success": False,
+                    "error": (
+                        f"Cannot bind tool_call_id to action with status "
+                        f"'{target_status}' — the action is no longer pending"
+                    ),
+                }
 
             target["tool_call_id"] = tool_call_id
             target["request_in_flight"] = False  # Unset claim upon binding
