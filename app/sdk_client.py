@@ -37,6 +37,10 @@ SESSIONS_FILE = DATA_DIR / "sessions.json"
 
 TOOL_TIMEOUT_SECONDS = 15
 MAX_ERROR_OUTPUT = 500
+# Lease timeout for request_in_flight claims.  If a TrueForge request
+# does not return within this window the claim is considered abandoned
+# and may be reclaimed atomically.
+REQUEST_CLAIM_TIMEOUT_SECONDS = 300  # 5 minutes
 
 
 class ToolTimeoutError(RuntimeError):
@@ -294,10 +298,13 @@ def request_approval(sid: str, atype: str, adetail: dict) -> dict:
                         }
 
                     # Atomically claim the request forward
+                    now_claim = datetime.now(timezone.utc).isoformat()
                     existing["request_in_flight"] = True
+                    existing["request_started_at"] = now_claim
                     for action in s.get("actions", []):
                         if action.get("action_id") == existing["action_id"]:
                             action["request_in_flight"] = True
+                            action["request_started_at"] = now_claim
                             break
 
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -326,6 +333,7 @@ def request_approval(sid: str, atype: str, adetail: dict) -> dict:
                 "decided_at": None,
                 "decided_by": None,
                 "request_in_flight": True,  # Claim initial forward
+                "request_started_at": now,   # Lease timestamp
             }
 
             s["approval_state"] = ap
@@ -357,10 +365,12 @@ def release_request_claim(sid: str, action_id: str) -> dict:
             ap = s.get("approval_state")
             if ap and ap.get("action_id") == action_id:
                 ap["request_in_flight"] = False
+                ap.pop("request_started_at", None)
 
             for action in s.get("actions", []):
                 if action.get("action_id") == action_id:
                     action["request_in_flight"] = False
+                    action.pop("request_started_at", None)
                     break
 
             s["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -714,6 +724,10 @@ def _has_active_approval_operation(session: dict) -> str | None:
     approval operation, or ``None`` if supersession is safe.
 
     Must be called under the same session lock as the mutation it guards.
+
+    A ``request_in_flight`` claim with an expired lease is treated as
+    abandoned and does *not* block supersession.  The caller that
+    detects expiry must clear the stale claim atomically.
     """
     current = session.get("approval_state")
     if not isinstance(current, dict) or current.get("status") != "pending":
@@ -721,6 +735,24 @@ def _has_active_approval_operation(session: dict) -> str | None:
     if current.get("decision_in_progress"):
         return "An approval decision is currently being forwarded to TrueForge"
     if current.get("request_in_flight"):
+        # Check lease expiry — a crashed/abandoned request must not block
+        # reinvestigation or new approval requests indefinitely.
+        request_started = current.get("request_started_at")
+        if request_started:
+            try:
+                started = datetime.fromisoformat(
+                    request_started.replace("Z", "+00:00")
+                )
+                age_seconds = (
+                    datetime.now(timezone.utc) - started
+                ).total_seconds()
+                if age_seconds > REQUEST_CLAIM_TIMEOUT_SECONDS:
+                    return None  # Lease expired — claim is abandoned
+            except (TypeError, ValueError):
+                return None  # Invalid timestamp — treat as expired
+        else:
+            # No timestamp (pre-lease codepath) — treat as expired
+            return None
         return "An approval request is currently in flight with TrueForge"
     return None
 
@@ -764,6 +796,7 @@ def _supersede_pending_approval(session: dict) -> str | None:
         # approval as live, in-flight, or mid-decision.
         record.pop("decision_in_progress", None)
         record["request_in_flight"] = False
+        record.pop("request_started_at", None)
 
     _retire(current)
     for action in session.get("actions", []):
@@ -870,23 +903,29 @@ def set_approval_tool_call_id(
                 return {"success": False, "error": "Action not found"}
 
             target_status = target.get("status")
-            if target_status in ("superseded", "approved", "rejected"):
+            if target_status == "superseded":
                 return {
                     "success": False,
                     "error": (
                         f"Cannot bind tool_call_id to action with status "
-                        f"'{target_status}' — the action is no longer pending"
+                        f"'superseded' — the action was replaced by a reinvestigation"
                     ),
                 }
+            # approved/rejected actions CAN receive a late tool_call_id for
+            # the legitimate late-forward path (decision completed locally
+            # before TrueForge returned with the tool_call_id).
+            # pending actions receive a normal binding.
 
             target["tool_call_id"] = tool_call_id
             target["request_in_flight"] = False  # Unset claim upon binding
+            target.pop("request_started_at", None)  # Clear lease timestamp
             if thread_id:
                 target["thread_id"] = thread_id
 
             if ap and ap.get("action_id") == action_id and target is not ap:
                 ap["tool_call_id"] = tool_call_id
                 ap["request_in_flight"] = False
+                ap.pop("request_started_at", None)
                 if thread_id:
                     ap["thread_id"] = thread_id
 
@@ -894,6 +933,7 @@ def set_approval_tool_call_id(
                 if action.get("action_id") == action_id and action is not target:
                     action["tool_call_id"] = tool_call_id
                     action["request_in_flight"] = False
+                    action.pop("request_started_at", None)
                     if thread_id:
                         action["thread_id"] = thread_id
                     target = action if target is None else target

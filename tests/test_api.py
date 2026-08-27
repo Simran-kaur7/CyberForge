@@ -630,7 +630,7 @@ def run_all():
             assert "superseded" in br["error"]
     check("test_stale_action_rejects_tool_call_id_binding", t41)
 
-    # 42: Terminal (approved/rejected) action cannot receive a tool_call_id
+    # 42: Late approved decision forwards tool_call_id (legitimate late-forward)
     def t42():
         def body(sdk_client):
             s = sdk_client.create_session("INC-RACE-4")
@@ -641,11 +641,15 @@ def run_all():
             # Approve the action
             ar = sdk_client.approve_action(sid, aid)
             assert ar["status"] == "approved"
-            # Late TrueForge response tries to bind
+            # Late TrueForge response tries to bind — must succeed for late-forward
             br = sdk_client.set_approval_tool_call_id(sid, aid, "tf-call-456")
-            assert br["success"] is False, "Must not bind tool_call_id to approved action"
-            assert "approved" in br["error"]
-    check("test_terminal_action_rejects_tool_call_id_binding", t42)
+            assert br["success"] is True, "Late binding to approved action must succeed"
+            assert br.get("pending_decision") == "approved"
+            # Forwarded exactly once
+            br2 = sdk_client.set_approval_tool_call_id(sid, aid, "tf-call-456")
+            assert br2["success"] is True
+            assert br2.get("already_forwarded") is True
+    check("test_late_approved_forwards_tool_call_id", t42)
 
     # 43: Pending approval remains intact after rejected reinvestigation
     def t43():
@@ -739,7 +743,8 @@ def run_all():
 
     # 48: _has_active_approval_operation helper correctness
     def t48():
-        from app.sdk_client import _has_active_approval_operation
+        from app.sdk_client import _has_active_approval_operation, REQUEST_CLAIM_TIMEOUT_SECONDS
+        from datetime import datetime, timezone, timedelta
         # No approval state
         assert _has_active_approval_operation({}) is None
         assert _has_active_approval_operation({"approval_state": None}) is None
@@ -761,22 +766,266 @@ def run_all():
                 "decision_in_progress": {"decision": "approved", "token": "t"}
             }
         }) is not None
-        # Pending with request_in_flight
+        # Pending with request_in_flight but NO timestamp (backwards compat) → expired
         assert _has_active_approval_operation({
             "approval_state": {
                 "status": "pending", "action_id": "a",
                 "request_in_flight": True
             }
-        }) is not None
-        # Pending with both active
+        }) is None, "request_in_flight without timestamp should be treated as expired"
+        # Pending with request_in_flight + fresh timestamp → active
+        now_iso = datetime.now(timezone.utc).isoformat()
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True,
+                "request_started_at": now_iso,
+            }
+        }) is not None, "Fresh request_in_flight must block"
+        # Pending with request_in_flight + expired timestamp → expired
+        old_time = (datetime.now(timezone.utc) - timedelta(seconds=REQUEST_CLAIM_TIMEOUT_SECONDS + 60)).isoformat()
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True,
+                "request_started_at": old_time,
+            }
+        }) is None, "Expired request_in_flight must not block"
+        # Pending with request_in_flight + invalid timestamp → treated as expired
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True,
+                "request_started_at": "not-a-date",
+            }
+        }) is None, "Invalid timestamp must be treated as expired"
+        # Pending with both decision_in_progress and request_in_flight active
         assert _has_active_approval_operation({
             "approval_state": {
                 "status": "pending", "action_id": "a",
                 "decision_in_progress": {"decision": "approved"},
-                "request_in_flight": True
+                "request_in_flight": True,
+                "request_started_at": now_iso,
             }
         }) is not None
     check("test_has_active_approval_operation", t48)
+
+    # ------------------------------------------------------------------
+    # 49-58: Bug 1 (late-forward) + Bug 2 (lease) regression tests
+    # ------------------------------------------------------------------
+
+    # 49: Superseded action rejects late tool_call_id
+    def t49():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LF-1")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.update_session(sid, supersede_stale_approval=True, evidence_snapshot={"x": 1})
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "late-tc")
+            assert br["success"] is False
+            assert "superseded" in br["error"]
+    check("test_superseded_rejects_late_tool_call_id", t49)
+
+    # 50: Approved action can receive late tool_call_id
+    def t50():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LF-2")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "late-approved-tc")
+            assert br["success"] is True
+            assert br.get("pending_decision") == "approved"
+    check("test_approved_allows_late_tool_call_id", t50)
+
+    # 51: Rejected action can receive late tool_call_id
+    def t51():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LF-3")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.reject_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "late-rejected-tc")
+            assert br["success"] is True
+            assert br.get("pending_decision") == "rejected"
+    check("test_rejected_allows_late_tool_call_id", t51)
+
+    # 52: Late approved decision forwarded exactly once
+    def t52():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LF-4")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br1 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-1")
+            assert br1.get("pending_decision") == "approved"
+            assert br1.get("already_forwarded") is not True
+            br2 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-1")
+            assert br2.get("already_forwarded") is True
+    check("test_late_approved_forwarded_exactly_once", t52)
+
+    # 53: Late rejected decision forwarded exactly once
+    def t53():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LF-5")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.reject_action(sid, aid)
+            br1 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-2")
+            assert br1.get("pending_decision") == "rejected"
+            br2 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-2")
+            assert br2.get("already_forwarded") is True
+    check("test_late_rejected_forwarded_exactly_once", t53)
+
+    # 54: Normal pending binding still works
+    def t54():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LF-6")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "normal-tc")
+            assert br["success"] is True
+            assert "pending_decision" not in br
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["tool_call_id"] == "normal-tc"
+    check("test_normal_pending_binding", t54)
+
+    # 55: Fresh request_in_flight blocks duplicate request
+    def t55():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LS-1")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            assert r["success"] is True
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"].get("request_started_at") is not None
+            # Duplicate blocked
+            r2 = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            assert r2["success"] is False
+            assert r2.get("in_flight") is True
+    check("test_fresh_request_in_flight_blocks_duplicate", t55)
+
+    # 56: Fresh request_in_flight blocks reinvestigation
+    def t56():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LS-2")
+            sid = s["id"]
+            sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            ur = sdk_client.update_session(
+                sid, supersede_stale_approval=True,
+                evidence_snapshot={"new": True}
+            )
+            assert ur["success"] is False
+            assert ur.get("approval_in_progress") is True
+    check("test_fresh_request_blocks_reinvestigation", t56)
+
+    # 57: Expired request_in_flight can be reclaimed
+    def t57():
+        from datetime import datetime, timezone, timedelta
+        from app.sdk_client import REQUEST_CLAIM_TIMEOUT_SECONDS
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LS-3")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            # Manually age the timestamp past the lease
+            old_time = (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=REQUEST_CLAIM_TIMEOUT_SECONDS + 60)
+            ).isoformat()
+            sess = sdk_client.get_session(sid)
+            sess["approval_state"]["request_started_at"] = old_time
+            # Write back via raw mutation (bypasses update_session protected keys)
+            def _age(sessions):
+                for s2 in sessions:
+                    if s2["id"] == sid:
+                        s2["approval_state"]["request_started_at"] = old_time
+                        for a in s2["actions"]:
+                            if a.get("action_id") == aid:
+                                a["request_started_at"] = old_time
+            sdk_client._mutate_sessions(_age)
+            # Now reinvestigation should succeed (claim expired)
+            ur = sdk_client.update_session(
+                sid, supersede_stale_approval=True,
+                evidence_snapshot={"reclaimed": True}
+            )
+            assert ur["success"] is True, "Expired lease must allow reinvestigation"
+            assert ur.get("superseded_action_id") == aid
+    check("test_expired_request_can_be_reclaimed", t57)
+
+    # 58: Expired request allows new approval request
+    def t58():
+        from datetime import datetime, timezone, timedelta
+        from app.sdk_client import REQUEST_CLAIM_TIMEOUT_SECONDS
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LS-4")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            # Age the timestamp
+            old_time = (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=REQUEST_CLAIM_TIMEOUT_SECONDS + 60)
+            ).isoformat()
+            def _age(sessions):
+                for s2 in sessions:
+                    if s2["id"] == sid:
+                        s2["approval_state"]["request_started_at"] = old_time
+                        for a in s2["actions"]:
+                            if a.get("action_id") == aid:
+                                a["request_started_at"] = old_time
+            sdk_client._mutate_sessions(_age)
+            # Supersede the expired approval first
+            sdk_client.update_session(sid, supersede_stale_approval=True, evidence_snapshot={"x": 1})
+            # Now a fresh request should succeed
+            r2 = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            assert r2["success"] is True
+            assert r2.get("reused") is False
+    check("test_expired_request_allows_new_approval", t58)
+
+    # 59: Successful request clears request_in_flight and timestamp
+    def t59():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LS-5")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            # Simulate successful TrueForge response
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "success-tc")
+            assert br["success"] is True
+            sess = sdk_client.get_session(sid)
+            ap = sess["approval_state"]
+            assert ap["request_in_flight"] is False
+            assert ap.get("request_started_at") is None
+            assert ap["tool_call_id"] == "success-tc"
+    check("test_successful_request_clears_timestamp", t59)
+
+    # 60: Failed request clears request_in_flight and timestamp
+    def t60():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-LS-6")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            # Simulate failed TrueForge response
+            sdk_client.release_request_claim(sid, aid)
+            sess = sdk_client.get_session(sid)
+            ap = sess["approval_state"]
+            assert ap["request_in_flight"] is False
+            assert ap.get("request_started_at") is None
+    check("test_failed_request_clears_timestamp", t60)
 
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
