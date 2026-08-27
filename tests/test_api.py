@@ -2008,6 +2008,240 @@ def run_all():
         }) is not None
     check("test_has_competing_decision_operation", t101)
 
+
+
+    # ------------------------------------------------------------------
+    # New Qodo regressions — uncertain TrueForge delivery must be manually
+    # resolved and never silently converted back into an automatic retry.
+    # ------------------------------------------------------------------
+
+    def _make_terminal_forwarding_state(sdk_client, incident_id, tool_call_id):
+        session = sdk_client.create_session(incident_id)
+        sid = session["id"]
+        result = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.99"})
+        aid = result["action_id"]
+        sdk_client.release_request_claim(sid, aid)
+        approved = sdk_client.approve_action(sid, aid)
+        assert approved["success"] is True
+        bound = sdk_client.set_approval_tool_call_id(sid, aid, tool_call_id)
+        assert bound.get("pending_decision") == "approved"
+        return sid, aid, bound["forwarding_owner"]
+
+    # 108: The protected API endpoint can manually resolve an uncertain
+    # forwarding state and records the authenticated operator as resolved_by.
+    def t108():
+        import app.api.approvals as approvals_mod
+        from app.api.approvals import UncertainForwardingResolutionRequest
+
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-API-UNCERTAIN")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.99"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-api-uncertain")
+            token = br["forwarding_owner"]
+            sdk_client.mark_forwarding_dispatched(sid, aid, token)
+            sdk_client.mark_forwarding_uncertain(
+                sid, aid, "simulated ambiguous timeout", owner_token=token
+            )
+
+            original_key = approvals_mod.EXPECTED_API_KEY
+            approvals_mod.EXPECTED_API_KEY = "resolve-key"
+            try:
+                result = approvals_mod.resolve_uncertain_approval_forwarding(
+                    UncertainForwardingResolutionRequest(
+                        session_id=sid,
+                        action_id=aid,
+                        confirmed_delivered=True,
+                    ),
+                    "Bearer resolve-key",
+                )
+            finally:
+                approvals_mod.EXPECTED_API_KEY = original_key
+
+            assert result["success"] is True
+            assert result["resolved_by"] == "analyst"
+            assert result["forwarded"] is True
+            act = [a for a in sdk_client.get_session(sid)["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarded_to_trueforge") is True
+            assert act.get("forward_resolved_by") == "analyst"
+            assert act.get("forwarding_dispatched_at") is None
+        with_temp_sessions(body)
+    check("test_uncertain_forwarding_is_manually_resolvable_via_protected_api", t108)
+
+    # 109: API resolution as delivered finalizes the action without replay.
+    def t109():
+        import app.api.approvals as approvals_mod
+        from app.api.approvals import UncertainForwardingResolutionRequest
+
+        def body(sdk_client):
+            sid, aid, token = _make_terminal_forwarding_state(
+                sdk_client, "INC-API-DELIVERED", "tc-api-delivered"
+            )
+            sdk_client.mark_forwarding_dispatched(sid, aid, token)
+            sdk_client.mark_forwarding_uncertain(
+                sid, aid, "response read failed", owner_token=token
+            )
+
+            original_key = approvals_mod.EXPECTED_API_KEY
+            approvals_mod.EXPECTED_API_KEY = "resolve-key"
+            try:
+                result = approvals_mod.resolve_uncertain_approval_forwarding(
+                    UncertainForwardingResolutionRequest(
+                        session_id=sid,
+                        action_id=aid,
+                        confirmed_delivered=True,
+                    ),
+                    "Bearer resolve-key",
+                )
+            finally:
+                approvals_mod.EXPECTED_API_KEY = original_key
+
+            assert result["forwarded"] is True
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-api-delivered")
+            assert rr["success"] is False
+            assert "already forwarded" in rr["error"].lower()
+        with_temp_sessions(body)
+    check("test_operator_resolves_uncertain_as_delivered", t109)
+
+    # 110: API resolution as not-delivered explicitly clears the uncertain
+    # state, after which the existing retry path may acquire a fresh claim.
+    def t110():
+        import app.api.approvals as approvals_mod
+        from app.api.approvals import UncertainForwardingResolutionRequest
+
+        def body(sdk_client):
+            sid, aid, token = _make_terminal_forwarding_state(
+                sdk_client, "INC-API-NOT-DELIVERED", "tc-api-notdelivered"
+            )
+            sdk_client.mark_forwarding_dispatched(sid, aid, token)
+            sdk_client.mark_forwarding_uncertain(
+                sid, aid, "connection reset", owner_token=token
+            )
+
+            original_key = approvals_mod.EXPECTED_API_KEY
+            approvals_mod.EXPECTED_API_KEY = "resolve-key"
+            try:
+                result = approvals_mod.resolve_uncertain_approval_forwarding(
+                    UncertainForwardingResolutionRequest(
+                        session_id=sid,
+                        action_id=aid,
+                        confirmed_delivered=False,
+                    ),
+                    "Bearer resolve-key",
+                )
+            finally:
+                approvals_mod.EXPECTED_API_KEY = original_key
+
+            assert result["forwarded"] is False
+            assert result["resolved_by"] == "analyst"
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-api-notdelivered")
+            assert rr["success"] is True
+            assert rr.get("uncertain_delivery") is not True
+            assert rr.get("pending_decision") == "approved"
+        with_temp_sessions(body)
+    check("test_operator_resolves_uncertain_as_not_delivered", t110)
+
+    # 111: A timeout after mark_forwarding_dispatched preserves the durable
+    # dispatch marker and is returned as uncertain, not retryable.
+    def t111():
+        import app.api.approvals as approvals_mod
+        from app.api.approvals import ApprovalRequest
+        from unittest.mock import patch
+
+        def body(sdk_client):
+            sid, aid, token = _make_terminal_forwarding_state(
+                sdk_client, "INC-AMBIG-TIMEOUT", "tc-amb-timeout"
+            )
+            # The route retry path must acquire the forwarding claim itself.
+            sdk_client.release_forwarding_claim(sid, aid, "reset before API retry", owner_token=token)
+            sdk_client.persist_trueforge_session_id(sid, "tf-amb-timeout")
+
+            original_key = approvals_mod.EXPECTED_API_KEY
+            approvals_mod.EXPECTED_API_KEY = "resolve-key"
+            try:
+                with patch.object(
+                    approvals_mod, "_tf_post_sse",
+                    side_effect=[
+                        {"tool_call_id": "tc-amb-timeout", "thread_id": "thread-amb"},
+                        TimeoutError("simulated response-read timeout"),
+                    ],
+                ), patch.object(
+                    sdk_client,
+                    "request_approval",
+                    return_value={
+                        "success": True,
+                        "action_id": aid,
+                        "status": "pending",
+                        "reused": True,
+                    },
+                ):
+                    result = approvals_mod.request_containment_approval(
+                        ApprovalRequest(
+                            session_id=sid,
+                            trueforge_session_id="tf-amb-timeout",
+                        ),
+                        "Bearer resolve-key",
+                    )
+            finally:
+                approvals_mod.EXPECTED_API_KEY = original_key
+
+            assert result["success"] is False
+            assert result.get("uncertain_delivery") is True
+            assert result.get("retryable") is False
+            act = [a for a in sdk_client.get_session(sid)["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarding_dispatched_at") is not None
+            assert act.get("forwarding_outcome") == "uncertain"
+            assert act.get("forwarding_to_trueforge") is True
+            assert act.get("forwarded_to_trueforge") is not True
+        with_temp_sessions(body)
+    check("test_ambiguous_timeout_after_dispatch_preserves_marker", t111)
+
+    # 112: The same ambiguous state cannot be automatically retried; an active
+    # claim is preserved, and after expiry retry still reports uncertainty.
+    def t112():
+        def body(sdk_client):
+            sid, aid, token = _make_terminal_forwarding_state(
+                sdk_client, "INC-AMBIG-NORETRY", "tc-amb-noretry"
+            )
+            sdk_client.mark_forwarding_dispatched(sid, aid, token)
+            sdk_client.mark_forwarding_uncertain(
+                sid, aid, "socket reset after POST", owner_token=token
+            )
+
+            rr_active = sdk_client.retry_approval_forwarding(sid, aid, "tc-amb-noretry")
+            assert rr_active["success"] is True
+            assert rr_active.get("already_forwarding") is True
+            assert rr_active.get("pending_decision") is None
+
+            _age_forwarding_claim(sdk_client, sid, aid)
+            rr_expired = sdk_client.retry_approval_forwarding(sid, aid, "tc-amb-noretry")
+            assert rr_expired["success"] is False
+            assert rr_expired.get("uncertain_delivery") is True
+            act = [a for a in sdk_client.get_session(sid)["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarding_dispatched_at") is not None
+            assert act.get("forwarding_owner") == token
+        with_temp_sessions(body)
+    check("test_ambiguous_failure_never_becomes_automatic_retry", t112)
+
+    # 113: A failure before dispatch remains retryable; no dispatch marker is
+    # present, so the existing lease-reclaim path is unchanged.
+    def t113():
+        def body(sdk_client):
+            sid, aid, token = _make_terminal_forwarding_state(
+                sdk_client, "INC-PRE-DISPATCH", "tc-pre-dispatch"
+            )
+            # Simulate failure before the outbound POST/dispatch marker.
+            _age_forwarding_claim(sdk_client, sid, aid)
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-pre-dispatch")
+            assert rr["success"] is True
+            assert rr.get("uncertain_delivery") is not True
+            assert rr.get("forwarding_owner") != token
+        with_temp_sessions(body)
+    check("test_definite_pre_dispatch_failure_remains_retryable", t113)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:

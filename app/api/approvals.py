@@ -82,6 +82,12 @@ class DecisionRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class UncertainForwardingResolutionRequest(BaseModel):
+    session_id: str
+    action_id: str
+    confirmed_delivered: bool
+
+
 def _require_api_key(authorization: Optional[str] = Header(None)) -> str:
     if not EXPECTED_API_KEY:
         import logging
@@ -304,6 +310,7 @@ def request_containment_approval(
             retry_approval_forwarding,
             release_request_claim,
             mark_forwarding_dispatched,
+            mark_forwarding_uncertain,
         )
 
         session = get_session(body.session_id)
@@ -576,25 +583,33 @@ def request_containment_approval(
                 )
 
             except Exception:
-                # Broadened beyond RuntimeError: any failure here — a timeout,
-                # a connection error, or anything unexpected — must release
-                # the forwarding claim. Otherwise forwarding_to_trueforge
-                # would remain True forever and the action could never be
-                # retried or resolved.
+                # The dispatch marker was durably written immediately before the
+                # POST. From this point onward, a timeout/reset/read failure may
+                # mean TrueForge already accepted the decision. Do NOT release
+                # the forwarding claim or clear forwarding_dispatched_at, or a
+                # normal retry could submit the same decision twice.
                 logger.exception(
-                    "Late-forward decision failed for session=%s action=%s "
-                    "tool_call_id=%s",
+                    "Late-forward decision failed after dispatch for session=%s "
+                    "action=%s tool_call_id=%s",
                     local_session_id,
                     action_id,
                     tool_call_id,
                 )
 
-                release_forwarding_claim(
+                mark_result = mark_forwarding_uncertain(
                     local_session_id,
                     action_id,
-                    "Late-forward decision failed",
+                    "Late-forward decision outcome is uncertain",
                     owner_token=forwarding_owner_token,
                 )
+                if not mark_result.get("success"):
+                    logger.error(
+                        "Could not persist uncertain forwarding state for session=%s "
+                        "action=%s: %s",
+                        local_session_id,
+                        action_id,
+                        mark_result.get("error", "unknown error"),
+                    )
 
                 return {
                     "success": False,
@@ -605,8 +620,9 @@ def request_containment_approval(
                     "thread_id": thread_id,
                     "analyst": analyst,
                     "trueforge_event": tf_event,
-                    "error": "Late-forward decision to TrueForge failed",
-                    "retryable": True,
+                    "error": "Late-forward decision outcome is uncertain; manual verification required.",
+                    "uncertain_delivery": True,
+                    "retryable": False,
                 }
 
         return {
@@ -789,6 +805,51 @@ def reject_containment(
         raise
     except Exception:
         raise HTTPException(status_code=500, detail="Rejection failed")
+
+
+@router.post("/resolve-uncertain")
+def resolve_uncertain_approval_forwarding(
+    body: UncertainForwardingResolutionRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Resolve a post-dispatch TrueForge delivery outcome after operator verification."""
+    resolved_by = _require_api_key(authorization)
+    try:
+        from app.sdk_client import get_session, resolve_uncertain_forwarding
+
+        session = get_session(body.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        result = resolve_uncertain_forwarding(
+            body.session_id,
+            body.action_id,
+            body.confirmed_delivered,
+            resolved_by=resolved_by,
+        )
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=409,
+                detail=result.get("error", "Could not resolve uncertain forwarding"),
+            )
+
+        return {
+            **result,
+            "session_id": body.session_id,
+            "resolved_by": resolved_by,
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "Uncertain forwarding resolution failed for session=%s action=%s",
+            body.session_id,
+            body.action_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Uncertain forwarding resolution failed due to an internal error.",
+        )
 
 
 @router.get("/pending")

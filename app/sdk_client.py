@@ -875,6 +875,11 @@ def _forwarding_needs_manual_resolution(action: dict) -> bool:
         return False
     if not action.get("forwarding_dispatched_at"):
         return False
+    # An explicit uncertain outcome is resolvable immediately. Otherwise a
+    # dispatched claim becomes uncertain only when its lease has expired (the
+    # crash-recovery case where the process disappeared before finalization).
+    if action.get("forwarding_outcome") == "uncertain":
+        return True
     return not _is_forwarding_claim_active(action)
 
 
@@ -1347,21 +1352,73 @@ def mark_forwarding_dispatched(sid: str, action_id: str, owner_token: str | None
     return _mutate_sessions(_mark)
 
 
+def mark_forwarding_uncertain(
+    sid: str,
+    action_id: str,
+    error: str,
+    owner_token: str | None = None,
+) -> dict:
+    """Mark a post-dispatch forwarding failure as uncertain without releasing it.
+
+    Once ``mark_forwarding_dispatched`` has succeeded, a subsequent POST failure
+    may mean TrueForge accepted the request but the response was lost.  Keep the
+    forwarding claim and dispatch marker intact so normal retry cannot re-submit
+    the decision.  The action is then resolved explicitly by an operator.
+    """
+    def _mark(sessions):
+        for session in sessions:
+            if session["id"] != sid:
+                continue
+            for action in session.get("actions", []):
+                if action.get("action_id") != action_id:
+                    continue
+                if owner_token and action.get("forwarding_owner") != owner_token:
+                    return {
+                        "success": False,
+                        "error": "Forwarding claim belongs to another caller",
+                    }
+                if not action.get("forwarding_to_trueforge"):
+                    return {
+                        "success": False,
+                        "error": "No active forwarding claim to mark as uncertain",
+                    }
+                if not action.get("forwarding_dispatched_at"):
+                    return {
+                        "success": False,
+                        "error": "Forwarding was not marked as dispatched",
+                    }
+                now = datetime.now(timezone.utc).isoformat()
+                action["forwarding_outcome"] = "uncertain"
+                action["forward_error"] = error
+                action["forwarding_uncertain_at"] = now
+                session["updated_at"] = now
+                return {
+                    "success": True,
+                    "action_id": action_id,
+                    "uncertain_delivery": True,
+                    "retryable": False,
+                }
+            return {"success": False, "error": "Action not found"}
+        return {"success": False, "error": "Session not found"}
+
+    with forwarding_action_lock(sid, action_id):
+        return _mutate_sessions(_mark)
+
+
 def resolve_uncertain_forwarding(
     sid: str,
     action_id: str,
     confirmed_delivered: bool,
     resolved_by: str = "operator",
 ) -> dict:
-    """Manually resolve a forwarding claim left uncertain by a crash.
+    """Manually resolve a forwarding claim left uncertain by a crash or ambiguity.
 
-    Only applies to an action currently in the uncertain state produced by
-    ``_forwarding_needs_manual_resolution`` (a dispatch marker is set and
-    the owning claim's lease has expired without ``complete_forwarding``
-    or a release ever running) — this is a deliberate operator action taken
-    after checking TrueForge directly out-of-band, not an automatic retry
-    path, since TrueForge does not offer an idempotency-key contract that
-    would let the system verify this itself.
+    Applies only when a durable dispatch marker exists and the action is in an
+    uncertain state, either explicitly marked after an ambiguous failure or
+    discovered after an expired lease with no finalization. This is a deliberate
+    operator action taken after checking TrueForge directly out-of-band, not an
+    automatic retry path, since TrueForge does not offer an idempotency-key
+    contract that would let the system verify this itself.
 
     ``confirmed_delivered=True`` finalizes the decision as forwarded
     without re-POSTing, so a delivery that already happened is never
@@ -1385,6 +1442,8 @@ def resolve_uncertain_forwarding(
                     action.pop("forwarding_owner", None)
                     action.pop("forwarding_started_at", None)
                     action.pop("forwarding_dispatched_at", None)
+                    action.pop("forwarding_outcome", None)
+                    action.pop("forwarding_uncertain_at", None)
                     action["forward_resolved_by"] = resolved_by
                     if confirmed_delivered:
                         action["forwarded_to_trueforge"] = True
