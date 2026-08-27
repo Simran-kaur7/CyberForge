@@ -260,7 +260,13 @@ def forwarding_lock_path(sid: str, action_id: str) -> Path:
     """Lock file identity for one CyberForge approval action's TrueForge forward."""
     lock_dir = DATA_DIR / "forwarding_locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    return lock_dir / forwarding_lock_filename(sid, action_id)
+    lock_dir_resolved = lock_dir.resolve()
+    candidate = (lock_dir_resolved / forwarding_lock_filename(sid, action_id)).resolve()
+    try:
+        candidate.relative_to(lock_dir_resolved)
+    except ValueError:
+        raise ValueError("Invalid forwarding lock path")
+    return candidate
 
 
 @contextmanager
