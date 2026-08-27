@@ -244,6 +244,19 @@ def _read_sessions() -> list:
             fd.close()
 
 
+def _validate_lock_component(value: str, field: str) -> str:
+    """Validate untrusted lock path components before filesystem use."""
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid {field}")
+    if not value or len(value) > 128:
+        raise ValueError(f"Invalid {field}")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", value):
+        raise ValueError(f"Invalid {field}")
+    if value in {".", ".."}:
+        raise ValueError(f"Invalid {field}")
+    return value
+
+
 def forwarding_lock_filename(sid: str, action_id: str) -> str:
     """Stable, filesystem-safe name for a per-action forwarding fence."""
     raw = f"{sid}\x1f{action_id}"
@@ -253,10 +266,12 @@ def forwarding_lock_filename(sid: str, action_id: str) -> str:
 
 def forwarding_lock_path(sid: str, action_id: str) -> Path:
     """Lock file identity for one CyberForge approval action's TrueForge forward."""
+    sid_safe = _validate_lock_component(sid, "session_id")
+    action_id_safe = _validate_lock_component(action_id, "action_id")
     lock_dir = DATA_DIR / "forwarding_locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_dir_resolved = lock_dir.resolve()
-    candidate = (lock_dir_resolved / forwarding_lock_filename(sid, action_id)).resolve()
+    candidate = (lock_dir_resolved / forwarding_lock_filename(sid_safe, action_id_safe)).resolve()
     try:
         candidate.relative_to(lock_dir_resolved)
     except ValueError:
