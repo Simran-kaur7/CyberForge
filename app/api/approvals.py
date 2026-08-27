@@ -306,11 +306,13 @@ def request_containment_approval(
             set_approval_tool_call_id,
             persist_trueforge_session_id,
             release_forwarding_claim,
+            _release_forwarding_claim_locked,
             complete_forwarding,
             retry_approval_forwarding,
             release_request_claim,
             mark_forwarding_dispatched,
             mark_forwarding_uncertain,
+            _mark_forwarding_uncertain_locked,
             forwarding_action_lock,
         )
 
@@ -572,10 +574,50 @@ def request_containment_approval(
                     )
 
                 try:
-                    _tf_post_sse(
+                    tf_event = _tf_post_sse(
                         f"/api/v1/sessions/{tf_session_id}/turns",
                         {"input": [approval_input]},
                     )
+
+                    event_type = tf_event.get("type") if isinstance(tf_event, dict) else None
+                    if event_type in ("turn.failed", "error"):
+                        # TrueForge explicitly reported that the turn failed.
+                        # This is a definite application-level failure, not an
+                        # ambiguous transport outcome, so the action is safely
+                        # retryable. The locked primitive avoids recursively
+                        # acquiring the already-held per-action fence.
+                        release_result = _release_forwarding_claim_locked(
+                            local_session_id,
+                            action_id,
+                            f"TrueForge reported {event_type}",
+                            owner_token=forwarding_owner_token,
+                        )
+                        if not release_result.get("success"):
+                            logger.error(
+                                "Could not release failed late-forward claim for "
+                                "session=%s action=%s: %s",
+                                local_session_id,
+                                action_id,
+                                release_result.get("error", "unknown error"),
+                            )
+                            raise HTTPException(
+                                status_code=409,
+                                detail=release_result.get(
+                                    "error", "Forwarding claim could not be released"
+                                ),
+                            )
+                        return {
+                            "success": False,
+                            "action_id": action_id,
+                            "session_id": local_session_id,
+                            "trueforge_session_id": tf_session_id,
+                            "tool_call_id": tool_call_id,
+                            "thread_id": thread_id,
+                            "analyst": analyst,
+                            "trueforge_event": tf_event,
+                            "error": "TrueForge reported that the approval delivery failed.",
+                            "retryable": True,
+                        }
 
                     # TrueForge accepted the decision — finalize the
                     # forwarding state so a crash-restart cannot re-forward.
@@ -584,6 +626,8 @@ def request_containment_approval(
                         owner_token=forwarding_owner_token,
                     )
 
+                except HTTPException:
+                    raise
                 except Exception:
                     # The dispatch marker was durably written immediately before the
                     # POST. From this point onward, a timeout/reset/read failure may
@@ -598,7 +642,10 @@ def request_containment_approval(
                         tool_call_id,
                     )
 
-                    mark_result = mark_forwarding_uncertain(
+                    # We already hold the per-action fence. Use the fence-held
+                    # persistence primitive rather than mark_forwarding_uncertain(),
+                    # which would recursively acquire the same non-reentrant lock.
+                    mark_result = _mark_forwarding_uncertain_locked(
                         local_session_id,
                         action_id,
                         "Late-forward decision outcome is uncertain",
