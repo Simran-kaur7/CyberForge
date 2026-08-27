@@ -1601,6 +1601,47 @@ def run_all():
             assert act.get("forwarded_to_trueforge") is True
     check("test_crash_recovery_with_tokens", t93)
 
+    # 94: Crashed forwarding claim expires and can be reclaimed
+    def t94():
+        from datetime import datetime, timezone, timedelta
+        from app.sdk_client import FORWARDING_CLAIM_TIMEOUT_SECONDS
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-CRASH-FWD")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            # Acquire forwarding claim
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-cf")
+            token = br["forwarding_owner"]
+            # Simulate crash: age the forwarding timestamp past the lease
+            old_time = (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=FORWARDING_CLAIM_TIMEOUT_SECONDS + 60)
+            ).isoformat()
+            def _age(sessions):
+                for s2 in sessions:
+                    if s2["id"] == sid:
+                        for a in s2.get("actions", []):
+                            if a.get("action_id") == aid:
+                                a["forwarding_started_at"] = old_time
+            sdk_client._mutate_sessions(_age)
+            # Retry should reclaim the expired claim (not return already_forwarding)
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-cf")
+            assert rr["success"] is True, f"Retry failed: {rr}"
+            assert rr.get("pending_decision") == "approved"
+            new_token = rr["forwarding_owner"]
+            assert new_token != token, "Must get a new owner token"
+            # Complete the forwarding
+            sdk_client.complete_forwarding(sid, aid, owner_token=new_token)
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarded_to_trueforge") is True
+            assert act.get("forwarding_to_trueforge") is False
+            assert act.get("forwarding_owner") is None
+    check("test_crashed_forwarding_claim_expires", t94)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:

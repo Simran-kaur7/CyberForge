@@ -41,6 +41,9 @@ MAX_ERROR_OUTPUT = 500
 # does not return within this window the claim is considered abandoned
 # and may be reclaimed atomically.
 REQUEST_CLAIM_TIMEOUT_SECONDS = 300  # 5 minutes
+# Lease timeout for forwarding_to_trueforge claims.  A crashed owner's
+# forwarding claim must not block retries indefinitely.
+FORWARDING_CLAIM_TIMEOUT_SECONDS = 300  # 5 minutes
 
 
 class ToolTimeoutError(RuntimeError):
@@ -719,6 +722,25 @@ _REINVESTIGATION_SUPERSEDE_REASON = (
 )
 
 
+def _is_forwarding_claim_active(action: dict) -> bool:
+    """Return True if the action's forwarding claim is still within its lease.
+
+    An expired or missing ``forwarding_started_at`` timestamp means the
+    owner process has likely crashed and the claim should be reclaimable.
+    """
+    if not action.get("forwarding_to_trueforge"):
+        return False
+    started = action.get("forwarding_started_at")
+    if not started or not isinstance(started, str):
+        return False
+    try:
+        start_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - start_dt).total_seconds()
+        return age <= FORWARDING_CLAIM_TIMEOUT_SECONDS
+    except (TypeError, ValueError):
+        return False
+
+
 def _has_active_approval_operation(session: dict) -> str | None:
     """Return a human-readable reason if the session has an in-flight
     approval operation, or ``None`` if supersession is safe.
@@ -955,19 +977,20 @@ def set_approval_tool_call_id(
                                 "action_id": action_id,
                                 "already_forwarded": True,
                             }
-                        existing_owner = action.get("forwarding_owner")
-                        if action.get("forwarding_to_trueforge"):
-                            # Another caller already holds the claim.
+                        if _is_forwarding_claim_active(action):
+                            # Another caller holds a fresh claim.
                             return {
                                 "success": True,
                                 "action_id": action_id,
                                 "already_forwarding": True,
-                                "forwarding_owner": existing_owner,
+                                "forwarding_owner": action.get("forwarding_owner"),
                             }
-                        # First caller: atomically acquire the claim.
+                        # Expired or no claim — acquire fresh.
                         token = str(uuid.uuid4())
+                        now_claim = datetime.now(timezone.utc).isoformat()
                         action["forwarding_to_trueforge"] = True
                         action["forwarding_owner"] = token
+                        action["forwarding_started_at"] = now_claim
                         return {
                             "success": True,
                             "action_id": action_id,
@@ -1008,6 +1031,7 @@ def release_forwarding_claim(sid: str, action_id: str, error: str, owner_token: 
                     action["forwarding_to_trueforge"] = False
                     action["forwarded_to_trueforge"] = False
                     action.pop("forwarding_owner", None)
+                    action.pop("forwarding_started_at", None)
                     action["forward_error"] = error
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
                     return {"success": True, "action_id": action_id, "retryable": True}
@@ -1041,6 +1065,7 @@ def complete_forwarding(sid: str, action_id: str, owner_token: str | None = None
                     action["forwarding_to_trueforge"] = False
                     action["forwarded_to_trueforge"] = True
                     action.pop("forwarding_owner", None)
+                    action.pop("forwarding_started_at", None)
                     action.pop("forward_error", None)
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
                     return {"success": True, "action_id": action_id}
@@ -1104,21 +1129,22 @@ def retry_approval_forwarding(
                     "error": "Decision was already forwarded to TrueForge",
                 }
 
-            existing_owner = target.get("forwarding_owner")
-            if target.get("forwarding_to_trueforge") and existing_owner:
+            if _is_forwarding_claim_active(target):
                 return {
                     "success": True,
                     "action_id": action_id,
                     "already_forwarding": True,
-                    "forwarding_owner": existing_owner,
+                    "forwarding_owner": target.get("forwarding_owner"),
                 }
 
             # Atomically acquire forwarding claim.
             token = str(uuid.uuid4())
+            now_claim = datetime.now(timezone.utc).isoformat()
             target["forwarding_to_trueforge"] = True
             target["forwarding_owner"] = token
+            target["forwarding_started_at"] = now_claim
             target.pop("forward_error", None)
-            s["updated_at"] = datetime.now(timezone.utc).isoformat()
+            s["updated_at"] = now_claim
 
             return {
                 "success": True,
