@@ -5,13 +5,13 @@ import json
 from pathlib import Path
 
 # Add tools directory to path
-TOOLS_DIR = Path(__file__).resolve().parent.parent / "mcp_server" / "tools"
-sys.path.insert(0, str(TOOLS_DIR))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from search_security_logs import search_security_logs
-from check_system_activity import check_system_activity
-from analyze_evidence import analyze_evidence
-from block_ip import block_ip
+from mcp_server.tools.search_security_logs import search_security_logs
+from mcp_server.tools.check_system_activity import check_system_activity
+from mcp_server.tools.analyze_evidence import analyze_evidence
+from mcp_server.tools.block_ip import block_ip
 
 
 class TestSearchSecurityLogs:
@@ -69,15 +69,76 @@ class TestAnalyzeEvidence:
         assert indicators["suspicious_process"] is True
         assert indicators["unusual_connection"] is True
 
+    def test_target_matching_demo_ip(self):
+        """target_ip matching the demo IP should succeed."""
+        result = analyze_evidence(target_ip="10.0.0.25")
+        assert result["success"] is True
+        assert result["source_ip"] == "10.0.0.25"
+
+    def test_target_mismatch_rejected(self):
+        """target_ip different from demo IP should fail."""
+        result = analyze_evidence(target_ip="192.168.99.99")
+        assert result["success"] is False
+        assert "not available" in result["error"].lower() or "not for" in result["error"].lower()
+
+    def test_no_target_defaults_to_demo(self):
+        """No target_ip should default to demo behavior."""
+        result = analyze_evidence()
+        assert result["success"] is True
+
+
+class TestAnalyzeEvidenceNumericValidation:
+    def _run(self, auth, activity):
+        from unittest.mock import patch
+        with patch("analyze_evidence.search_security_logs", return_value=auth), \
+             patch("analyze_evidence.check_system_activity", return_value=activity):
+            return analyze_evidence()
+
+    def test_failed_logins_malformed(self):
+        result = self._run(
+            {"success": True, "failed_logins": "bad", "successful_logins": 1, "match_count": 1},
+            {"success": True, "suspicious_process_count": 0, "unusual_connection_count": 0, "process_count": 1},
+        )
+        assert result["success"] is False
+
+    def test_successful_logins_none(self):
+        result = self._run(
+            {"success": True, "failed_logins": 1, "successful_logins": None, "match_count": 1},
+            {"success": True, "suspicious_process_count": 0, "unusual_connection_count": 0, "process_count": 1},
+        )
+        assert result["success"] is False
+
+    def test_suspicious_process_count_malformed(self):
+        result = self._run(
+            {"success": True, "failed_logins": 1, "successful_logins": 0, "match_count": 1},
+            {"success": True, "suspicious_process_count": "bad", "unusual_connection_count": 0, "process_count": 1},
+        )
+        assert result["success"] is False
+
+    def test_unusual_connection_count_mapping(self):
+        result = self._run(
+            {"success": True, "failed_logins": 1, "successful_logins": 0, "match_count": 1},
+            {"success": True, "suspicious_process_count": 0, "unusual_connection_count": {}, "process_count": 1},
+        )
+        assert result["success"] is False
+
+    def test_valid_integer_like_values(self):
+        result = self._run(
+            {"success": True, "failed_logins": "45", "successful_logins": "3", "match_count": 48},
+            {"success": True, "suspicious_process_count": "1", "unusual_connection_count": 2.0, "process_count": "3"},
+        )
+        assert result["success"] is True
+        assert result["risk_indicators"]["failed_attempts"] == 45
+
 
 class TestBlockIp:
     def test_block_ip_success(self, tmp_path, monkeypatch):
         # Use a temp file for firewall data
         firewall_file = tmp_path / "firewall.json"
         monkeypatch.setattr(
-            "block_ip.FIREWALL_FILE", firewall_file
+            "mcp_server.tools.block_ip.FIREWALL_FILE", firewall_file
         )
-        from block_ip import block_ip as bip
+        from mcp_server.tools.block_ip import block_ip as bip
 
         result = bip("192.168.1.100")
         assert result["success"] is True

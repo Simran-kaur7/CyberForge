@@ -11,9 +11,49 @@ Requires CYBERFORGE_API_KEY for containment decisions.
 import os
 import json
 import urllib.request
-from fastapi import APIRouter, HTTPException, Header
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+
+try:
+    from fastapi import APIRouter, HTTPException, Header
+    from fastapi.responses import JSONResponse
+except ImportError:  # pragma: no cover - keeps local tests working without FastAPI
+    class HTTPException(Exception):
+        def __init__(self, status_code: int, detail: str):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    def Header(default=None):
+        return default
+
+    class JSONResponse(dict):
+        def __init__(self, content=None, status_code: int = 200):
+            super().__init__(content or {})
+            self.content = content or {}
+            self.status_code = status_code
+
+    class APIRouter:
+        def __init__(self, *args, **kwargs):
+            self.routes = []
+
+        def _decorator(self, *args, **kwargs):
+            def wrapper(func):
+                self.routes.append((args, kwargs, func))
+                return func
+            return wrapper
+
+        post = get = delete = _decorator
+
+try:
+    from pydantic import BaseModel
+except ImportError:  # pragma: no cover - lightweight fallback for tests
+    class BaseModel:
+        def __init__(self, **data):
+            for key, value in data.items():
+                setattr(self, key, value)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
 from typing import Optional
 
 
@@ -41,7 +81,13 @@ class DecisionRequest(BaseModel):
 
 def _require_api_key(authorization: Optional[str] = Header(None)) -> str:
     if not EXPECTED_API_KEY:
-        return "analyst"
+        import logging
+        logging.warning(
+            "CYBERFORGE_API_KEY is not set — containment endpoints "
+            "are running without authentication.  This is only "
+            "safe for local development."
+        )
+        return "analyst-local-dev"
 
     if not authorization:
         raise HTTPException(
@@ -49,7 +95,20 @@ def _require_api_key(authorization: Optional[str] = Header(None)) -> str:
             detail="Missing Authorization header",
         )
 
-    token = authorization.replace("Bearer ", "").strip()
+    # Strict Bearer-token parsing: must be exactly "Bearer <token>"
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0] != "Bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Authorization header format; expected 'Bearer <token>'",
+        )
+
+    token = parts[1].strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Empty Bearer token",
+        )
 
     if token != EXPECTED_API_KEY:
         raise HTTPException(
@@ -347,15 +406,16 @@ def request_containment_approval(
                 release_request_claim(local_session_id, action_id)
 
                 # Keep detailed exception context in server logs only.
-                print(
-                    f"TrueForge forward failed for session "
-                    f"{local_session_id}: {exc}"
+                import logging
+                logging.warning(
+                    "TrueForge forward failed for session %s",
+                    local_session_id,
                 )
 
-                # Keep the local approval pending so the same
-                # request can retry the TrueForge forward.
+                # Return success=false so the client knows the request was NOT
+                # forwarded, while keeping the local pending action retryable.
                 return {
-                    "success": True,
+                    "success": False,
                     "action_id": action_id,
                     "session_id": local_session_id,
                     "trueforge_session_id": tf_session_id,
@@ -363,7 +423,7 @@ def request_containment_approval(
                     "thread_id": None,
                     "analyst": analyst,
                     "trueforge_event": None,
-                    "trueforge_forward_error": "Failed to forward request to TrueForge; please retry.",
+                    "error": "Failed to forward request to TrueForge; please retry.",
                     "retryable": True,
                 }
 
@@ -415,15 +475,15 @@ def request_containment_approval(
                     {"input": [approval_input]},
                 )
 
-            except RuntimeError as exc:
+            except RuntimeError:
                 release_forwarding_claim(
                     local_session_id,
                     action_id,
-                    str(exc),
+                    "Late-forward decision failed",
                 )
 
                 return {
-                    "success": True,
+                    "success": False,
                     "action_id": action_id,
                     "session_id": local_session_id,
                     "trueforge_session_id": tf_session_id,
@@ -431,7 +491,7 @@ def request_containment_approval(
                     "thread_id": thread_id,
                     "analyst": analyst,
                     "trueforge_event": tf_event,
-                    "late_forward_failed": True,
+                    "error": "Late-forward decision to TrueForge failed",
                     "retryable": True,
                 }
 
@@ -449,10 +509,10 @@ def request_containment_approval(
     except HTTPException:
         raise
 
-    except Exception as exc:
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=f"Approval request failed: {exc}",
+            detail="Approval request failed due to an internal error.",
         )
 
 
@@ -547,16 +607,16 @@ def _decide_containment(
                 body.reason,
                 thread_id,
             )
-        except RuntimeError as exc:
+        except RuntimeError:
             fail_decision(
                 body.session_id,
                 body.action_id,
                 token,
-                str(exc),
+                "TrueForge decision forwarding failed",
             )
             raise HTTPException(
                 status_code=502,
-                detail=f"TrueForge decision forwarding failed: {exc}",
+                detail="TrueForge decision forwarding failed.",
             )
 
     completed = complete_decision(
@@ -607,8 +667,11 @@ def reject_containment(
 
 
 @router.get("/pending")
-def get_pending_approvals():
-    """List sessions with pending approval state from TrueForge."""
+def get_pending_approvals(
+    authorization: Optional[str] = Header(None),
+):
+    """List pending approval state; this is analyst-only information."""
+    _require_api_key(authorization)
     try:
         sessions = _tf_get("/api/v1/sessions")
 

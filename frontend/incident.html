@@ -55,7 +55,10 @@
       <p style="font-family:var(--font-mono);font-size:12.5px;color:var(--ink-dim);margin:0 0 18px;">
         Dispatch the root agent to correlate evidence across subagents before any response action is proposed.
       </p>
-      <button id="investigate-button" class="investigate-btn">Investigate Incident</button>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:0;">
+        <input type="text" id="target-input" class="search-input" placeholder="Enter target IP (e.g. 10.0.0.25) or leave empty for full analysis" style="flex:1;min-width:0;">
+        <button id="investigate-button" class="investigate-btn">Investigate</button>
+      </div>
     </div>
 
     <div class="plate">
@@ -185,6 +188,22 @@
   // ============================================================
   function buildEvidence(data) {
     var evidence = [];
+
+    // New format: structured finding from /api/investigate
+    if (data && data.evidence && Array.isArray(data.evidence)) {
+      data.evidence.forEach(function (line) {
+        var level = 'warn';
+        if (/failed|suspicious|unusual|critical/i.test(line)) level = 'crit';
+        var tag = '[FINDING]';
+        if (/SSH|login|auth/i.test(line)) tag = '[AUTH]';
+        else if (/network|connection|port/i.test(line)) tag = '[NET]';
+        else if (/process/i.test(line)) tag = '[SYS]';
+        evidence.push({ tag: tag, level: level, text: line });
+      });
+      return evidence;
+    }
+
+    // Legacy format: raw tool results
     var analysis = data && data.analysis || {};
     var auth = data && data.authentication || {};
     var activity = data && data.system_activity || {};
@@ -216,36 +235,34 @@
   //  EXPLAINABILITY BREAKDOWN
   // ============================================================
   function buildExplain(data, score) {
-    var indicators = (data && data.analysis && data.analysis.risk_indicators) || {};
     var items = [];
 
-    items.push({
-      label: 'Brute-force attempts',
-      points: (indicators.failed_attempts || 0) >= 20 ? 20 : 0,
-      max: 20
-    });
-    items.push({
-      label: 'Suspicious login',
-      points: indicators.successful_suspicious_login ? 25 : 0,
-      max: 25
-    });
-    items.push({
-      label: 'Suspicious process',
-      points: indicators.suspicious_process ? 25 : 0,
-      max: 25
-    });
-    items.push({
-      label: 'Unusual connection',
-      points: indicators.unusual_connection ? 20 : 0,
-      max: 20
-    });
+    // New format: risk_score.breakdown from the agent
+    if (data && data.risk_score && data.risk_score.breakdown) {
+      var bd = data.risk_score.breakdown;
+      var labels = {
+        failed_attempts: 'Brute-force attempts',
+        successful_suspicious_login: 'Suspicious login',
+        suspicious_process: 'Suspicious process',
+        unusual_connection: 'Unusual connection',
+        known_bad_source: 'Known-bad source IP'
+      };
+      var maxes = { failed_attempts: 20, successful_suspicious_login: 25, suspicious_process: 25, unusual_connection: 20, known_bad_source: 10 };
+      Object.keys(labels).forEach(function (key) {
+        var entry = bd[key] || {};
+        items.push({ label: labels[key], points: entry.points || 0, max: maxes[key] });
+      });
+      return items;
+    }
 
+    // Legacy format: compute from raw indicators
+    var indicators = (data && data.analysis && data.analysis.risk_indicators) || {};
+    items.push({ label: 'Brute-force attempts', points: (indicators.failed_attempts || 0) >= 20 ? 20 : 0, max: 20 });
+    items.push({ label: 'Suspicious login', points: indicators.successful_suspicious_login ? 25 : 0, max: 25 });
+    items.push({ label: 'Suspicious process', points: indicators.suspicious_process ? 25 : 0, max: 25 });
+    items.push({ label: 'Unusual connection', points: indicators.unusual_connection ? 20 : 0, max: 20 });
     var sourceIp = (data && data.analysis && data.analysis.source_ip) || '';
-    items.push({
-      label: 'Known-bad source IP',
-      points: sourceIp === '10.0.0.25' ? 10 : 0,
-      max: 10
-    });
+    items.push({ label: 'Known-bad source IP', points: sourceIp === '10.0.0.25' ? 10 : 0, max: 10 });
 
     return items;
   }
@@ -276,22 +293,35 @@
   // ============================================================
   //  GAUGE UPDATE
   // ============================================================
-  function updateGauge(score) {
+  function updateGauge(score, isUnknown) {
     var circumference = 490;
-    var offset = circumference - (score / 100) * circumference;
     var arc = document.getElementById('gauge-arc');
+    var gaugeValue = document.getElementById('gauge-value');
+    var riskNote = document.getElementById('risk-note');
+    var badge = document.getElementById('header-risk-badge');
+
+    if (isUnknown || score === null || score === undefined) {
+      arc.setAttribute('stroke-dashoffset', circumference);
+      arc.setAttribute('stroke', '#5c606c');
+      gaugeValue.textContent = '--';
+      gaugeValue.style.color = '#5c606c';
+      riskNote.textContent = 'Risk level: UNKNOWN';
+      badge.textContent = 'UNKNOWN';
+      badge.className = 'risk-badge';
+      return;
+    }
+
+    var offset = circumference - (score / 100) * circumference;
     arc.setAttribute('stroke-dashoffset', offset);
 
     var level = riskFromScore(score);
     var colors = { critical: '#ff2d2d', high: '#ff4d4d', medium: '#ff8a3d', low: '#4dd8ff' };
     arc.setAttribute('stroke', colors[level] || '#ff8a3d');
 
-    document.getElementById('gauge-value').textContent = score;
-    document.getElementById('gauge-value').style.color = colors[level] || '#ff8a3d';
-    document.getElementById('risk-note').textContent = 'Risk level: ' + riskLabelFromLevel(level);
+    gaugeValue.textContent = score;
+    gaugeValue.style.color = colors[level] || '#ff8a3d';
+    riskNote.textContent = 'Risk level: ' + riskLabelFromLevel(level);
 
-    // Update header badge
-    var badge = document.getElementById('header-risk-badge');
     badge.textContent = riskLabelFromLevel(level);
     badge.className = 'risk-badge risk-' + level;
   }
@@ -350,10 +380,15 @@
   //  STAT BLOCKS
   // ============================================================
   function updateStats(data) {
-    var analysis = data && data.analysis || {};
-    document.getElementById('stat-source').textContent = analysis.source_ip || '--';
-    document.getElementById('stat-host').textContent = analysis.host || '10.0.0.10';
-    document.getElementById('stat-seen').textContent = (data && data.authentication && data.authentication.first_seen) || '--';
+    // New format: structured finding
+    if (data && data.target_ip) {
+      document.getElementById('stat-source').textContent = data.target_ip;
+    } else {
+      var analysis = data && data.analysis || {};
+      document.getElementById('stat-source').textContent = analysis.source_ip || '--';
+    }
+    document.getElementById('stat-host').textContent = (data && data.host) || '10.0.0.10';
+    document.getElementById('stat-seen').textContent = (data && data.timestamp) || '--';
   }
 
   // ============================================================
@@ -370,7 +405,15 @@
     renderTimeline(0);
     toast('Investigation started for ' + incidentId, 'info');
 
-    fetch(API_BASE + '/api/incidents/' + encodeURIComponent(incidentId) + '/investigate')
+    var targetIp = document.getElementById('target-input').value.trim();
+    var requestBody = { query: 'Investigate suspicious activity' + (targetIp ? ' from ' + targetIp : '') };
+    if (targetIp) requestBody.target_ip = targetIp;
+
+    fetch(API_BASE + '/api/investigate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody)
+    })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -379,6 +422,12 @@
         investigationData = data;
         sessionId = data.session_id || null;
         trueforgeSessionId = data.trueforge_session_id || null;
+
+        // Update stat blocks from structured finding
+        if (data.target_ip) document.getElementById('stat-source').textContent = data.target_ip;
+        if (data.tools_used) document.getElementById('stat-subagents').textContent = data.tools_used.length;
+        document.getElementById('incident-desc').textContent =
+          (data.query || 'Investigation') + ' \u00b7 ' + (data.severity || 'Unknown') + ' severity';
 
         // Step through timeline
         renderTimeline(1);
@@ -390,20 +439,62 @@
       })
       .then(function () {
         renderTimeline(3);
-        var score = calculateRiskScore(investigationData);
-        updateGauge(score);
+        // Use backend risk_score if available, otherwise compute locally
+        var score = null;
+        if (investigationData.risk_score && typeof investigationData.risk_score === 'object') {
+          score = investigationData.risk_score.score;
+        }
+        if (score === null || score === undefined || typeof score !== 'number' || !isFinite(score)) {
+          score = null;
+        }
+        var gaugeScore = score !== null ? score : 0;
+        updateGauge(gaugeScore, score === null);
         renderEvidence(investigationData);
-        renderExplain(investigationData, score);
+        renderExplain(investigationData, gaugeScore);
         updateStats(investigationData);
+
+        // Render recommendation if available
+        if (investigationData.recommendation) {
+          var recEl = document.getElementById('decision-result');
+          recEl.className = 'decision-result info';
+          recEl.textContent = investigationData.recommendation;
+        }
         return new Promise(function (resolve) { setTimeout(resolve, 400); });
       })
       .then(function () {
         renderTimeline(4);
-        // Enable approve/reject
-        document.getElementById('approve-button').disabled = false;
-        document.getElementById('reject-button').disabled = false;
+        // Enable approve/reject only for complete investigations
+        var canContain = investigationData
+          && investigationData.success === true
+          && investigationData.status === 'complete'
+          && investigationData.evidence_complete === true
+          && investigationData.risk_score
+          && investigationData.risk_score.score !== null
+          && investigationData.risk_score.score !== undefined
+          && investigationData.target_ip
+          && investigationData.target_ip !== 'unknown'
+          && investigationData.session_id;
+        if (canContain) {
+          document.getElementById('approve-button').disabled = false;
+          document.getElementById('reject-button').disabled = false;
+        }
         document.getElementById('copy-button').disabled = false;
-        toast('Investigation complete. Risk score computed.', 'success');
+
+        if (!canContain) {
+          var reason = [];
+          if (!investigationData || !investigationData.success) reason.push('investigation failed');
+          else if (investigationData.status !== 'complete') reason.push('investigation incomplete (' + investigationData.status + ')');
+          else if (!investigationData.evidence_complete) reason.push('evidence incomplete');
+          else if (!investigationData.risk_score || investigationData.risk_score.score === null) reason.push('risk score unavailable');
+          else if (!investigationData.target_ip || investigationData.target_ip === 'unknown') reason.push('no target identified');
+          else if (!investigationData.session_id) reason.push('no session established');
+          toast('Containment unavailable: ' + reason.join(', '), 'info');
+        }
+
+        toast('Investigation complete.', 'success');
+        investigationInProgress = false;
+        btn.disabled = false;
+        btn.textContent = 'Investigate Incident';
       })
       .catch(function (err) {
         toast('Investigation failed: ' + err.message, 'error');
@@ -565,21 +656,13 @@
         return;
       }
 
-      // Only genuine connectivity failures (fetch() rejected outright,
-      // e.g. the backend process isn't running) fall back to demo mode.
+      // Genuine connectivity failures (fetch() rejected outright,
+      // e.g. the backend process isn't running) — do NOT fabricate a
+      // success.  Show that the decision could not be confirmed.
       var resultEl = document.getElementById('decision-result');
-      if (decision === 'approve') {
-        resultEl.className = 'decision-result approved';
-        resultEl.textContent = 'Approved (demo mode) — backend not connected.';
-      } else {
-        resultEl.className = 'decision-result rejected';
-        resultEl.textContent = 'Rejected (demo mode) — backend not connected.';
-      }
-      pendingLocalActionId = null;
-      pendingToolCallId = null;
-      document.getElementById('approve-button').disabled = true;
-      document.getElementById('reject-button').disabled = true;
-      toast('Decision recorded (demo mode)', 'info');
+      resultEl.className = 'decision-result rejected';
+      resultEl.textContent = 'Could not confirm decision — backend not reachable. Please retry.';
+      toast('Decision could not be confirmed — backend unreachable', 'error');
     });
   }
 
@@ -588,19 +671,42 @@
   // ============================================================
   function copyAudit() {
     if (!investigationData) return;
-    var score = calculateRiskScore(investigationData);
-    var level = riskFromScore(score);
+    var score = 0;
+    if (investigationData.risk_score && typeof investigationData.risk_score === 'object' && investigationData.risk_score.score !== null && investigationData.risk_score.score !== undefined) {
+      score = investigationData.risk_score.score;
+    } else {
+      score = null;
+    }
+    var auditLevel = score !== null ? riskFromScore(score) : null;
+    var auditScoreText = score !== null ? score + '/100 (' + riskLabelFromLevel(auditLevel) + ')' : 'UNKNOWN';
     var lines = [
       '=== CyberForge Audit Summary ===',
       'Incident: ' + incidentId,
-      'Source IP: ' + ((investigationData.analysis || {}).source_ip || 'unknown'),
-      'Risk Score: ' + score + '/100 (' + riskLabelFromLevel(level) + ')',
+      'Target: ' + (investigationData.target_ip || (investigationData.analysis || {}).source_ip || 'unknown'),
+      'Severity: ' + (investigationData.severity || (auditLevel ? riskLabelFromLevel(auditLevel) : 'UNKNOWN')),
+      'Risk Score: ' + auditScoreText,
       '',
       'Findings:'
     ];
-    ((investigationData.analysis || {}).findings || []).forEach(function (f) {
+    var findings = investigationData.findings || (investigationData.analysis || {}).findings || [];
+    findings.forEach(function (f) {
       lines.push('  - ' + f);
     });
+    if (investigationData.evidence && investigationData.evidence.length) {
+      lines.push('');
+      lines.push('Evidence:');
+      investigationData.evidence.forEach(function (e) {
+        lines.push('  - ' + e);
+      });
+    }
+    if (investigationData.recommendation) {
+      lines.push('');
+      lines.push('Recommendation: ' + investigationData.recommendation);
+    }
+    if (investigationData.tools_used && investigationData.tools_used.length) {
+      lines.push('');
+      lines.push('Tools used: ' + investigationData.tools_used.join(', '));
+    }
     lines.push('');
     lines.push('Investigated at: ' + new Date().toISOString());
 
@@ -628,11 +734,24 @@
         sessions.forEach(function (s) {
           if (s.id === sessionId) return; // skip current
           var li = document.createElement('li');
-          li.innerHTML =
-            '<span class="id">' + (s.incident_id || s.id) + '</span>' +
-            '<span class="status-resolved">' + (s.status || 'resolved') + '</span>' +
-            '<button class="reopen-btn" onclick="window.location.href=\'incident.html?id=' + (s.incident_id || s.id) + '\'">Reopen</button>';
-          list.appendChild(li);
+          var li = document.createElement('li');
+          var idSpan = document.createElement('span');
+          idSpan.className = 'id';
+          idSpan.textContent = s.incident_id || s.id;
+          var statusSpan = document.createElement('span');
+          statusSpan.className = 'status-resolved';
+          statusSpan.textContent = s.status || 'resolved';
+          var reopenBtn = document.createElement('button');
+          reopenBtn.className = 'reopen-btn';
+          reopenBtn.textContent = 'Reopen';
+          (function(incId) {
+            reopenBtn.addEventListener('click', function() {
+              window.location.href = 'incident.html?id=' + encodeURIComponent(incId);
+            });
+          })(s.incident_id || s.id);
+          li.appendChild(idSpan);
+          li.appendChild(statusSpan);
+          li.appendChild(reopenBtn);
         });
       })
       .catch(function () {
@@ -646,19 +765,31 @@
   }
 
   // ============================================================
-  //  CUSTOM CURSOR / RETICLE
+  //  CUSTOM CURSOR / RETICLE — Day 2 original approach
   // ============================================================
-  (function initCursor() {
-    var reticle = document.getElementById('reticle');
-    if (!reticle) return;
-    document.addEventListener('mousemove', function (e) {
-      reticle.style.transform = 'translate(' + e.clientX + 'px,' + e.clientY + 'px)';
+  var isCoarse = window.matchMedia('(pointer: coarse)').matches;
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var reticle = document.getElementById('reticle');
+  function bindReticle(){
+    if (isCoarse || !reticle) return;
+    document.querySelectorAll('button, a, .tilt-card, input, select, .investigate-btn, .btn-approve, .btn-reject, .copy-btn, .reopen-btn').forEach(function(el){
+      if (el.dataset.reticleBound) return;
+      el.dataset.reticleBound = 'true';
+      el.addEventListener('mouseenter', function(){
+        reticle.classList.add('active');
+        if (el.closest('.risk-high, .risk-critical')) reticle.classList.add('risk');
+        else if (el.closest('.risk-low')) reticle.classList.add('ok');
+      });
+      el.addEventListener('mouseleave', function(){ reticle.classList.remove('active','risk','ok'); });
     });
-    document.querySelectorAll('button, a, input, select').forEach(function (el) {
-      el.addEventListener('mouseenter', function () { reticle.classList.add('active'); });
-      el.addEventListener('mouseleave', function () { reticle.classList.remove('active'); });
-    });
-  })();
+  }
+  if (!isCoarse) {
+    var mx=0,my=0,cx=0,cy=0;
+    window.addEventListener('mousemove', function(e){ mx=e.clientX; my=e.clientY; });
+    function loop(){ cx += (mx-cx)*0.22; cy += (my-cy)*0.22; reticle.style.transform = 'translate('+cx+'px,'+cy+'px)'; requestAnimationFrame(loop); }
+    loop();
+    bindReticle();
+  }
 
   // ============================================================
   //  EMBER CANVAS PARTICLES
@@ -742,6 +873,7 @@
   //  INIT
   // ============================================================
   loadPrevious();
+  bindReticle();
 </script>
 
 </body>

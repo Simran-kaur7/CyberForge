@@ -1,2 +1,3 @@
-# CyberForge's current Python MCP tools use only the Python standard library.
-# Add and pin third-party packages here when their imports are introduced.
+# API runtime
+fastapi>=0.110,<1
+uvicorn[standard]>=0.27,<1

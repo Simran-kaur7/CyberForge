@@ -9,6 +9,7 @@ CyberForge SDK Client — Tool Runner, Session & Approval Management
 
 import os
 import platform
+import sys
 
 if platform.system() == "Windows":
     import msvcrt
@@ -51,7 +52,7 @@ def run_tool(script_name: str, *args: str) -> dict:
     script_path = TOOLS_DIR / script_name
     try:
         result = subprocess.run(
-            ["python", str(script_path), *args],
+            [sys.executable, str(script_path), *args],
             cwd=TOOLS_DIR,
             capture_output=True,
             text=True,
@@ -106,16 +107,42 @@ def block_ip(ip_address: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _load_sessions() -> list:
-    if SESSIONS_FILE.exists():
+    if not SESSIONS_FILE.exists():
+        return []
+    try:
         return json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
-    return []
+    except (json.JSONDecodeError, ValueError):
+        # Corrupted sessions file — back it up and start fresh
+        import shutil
+        backup = SESSIONS_FILE.with_suffix(".json.corrupted")
+        try:
+            shutil.copy2(SESSIONS_FILE, backup)
+        except OSError:
+            pass
+        return []
 
 
 def _save_sessions(sessions: list) -> None:
+    """Atomically write sessions: write to a temp file, then rename."""
+    import tempfile
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    SESSIONS_FILE.write_text(
-        json.dumps(sessions, indent=2, default=str), encoding="utf-8"
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=str(DATA_DIR), suffix=".tmp", prefix="sessions_"
     )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(sessions, indent=2, default=str))
+            f.flush()
+            os.fsync(f.fileno())
+        # Atomic replace (on same filesystem)
+        os.replace(tmp_path, str(SESSIONS_FILE))
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _mutate_sessions(fn):
@@ -131,8 +158,10 @@ def _mutate_sessions(fn):
         _save_sessions(sessions)
         return result
     finally:
-        _unlock_file(fd)
-        fd.close()
+        try:
+            _unlock_file(fd)
+        finally:
+            fd.close()
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +185,24 @@ def create_session(incident_id: str, evidence_snapshot=None) -> dict:
     return _mutate_sessions(_create)
 
 
+def _read_sessions() -> list:
+    """Read sessions under the file lock for a consistent snapshot."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = DATA_DIR / ".sessions.lock"
+    lock_path.touch(exist_ok=True)
+    fd = open(lock_path, "r+")
+    try:
+        _lock_file(fd)
+        return _load_sessions()
+    finally:
+        try:
+            _unlock_file(fd)
+        finally:
+            fd.close()
+
+
 def get_session(sid: str):
-    for s in _load_sessions():
+    for s in _read_sessions():
         if s["id"] == sid:
             return s
     return None
@@ -172,12 +217,12 @@ def list_sessions() -> list:
             "approval_state": s.get("approval_state"),
             "trueforge_session_id": s.get("trueforge_session_id"),
         }
-        for s in _load_sessions()
+        for s in _read_sessions()
     ]
 
 
 def find_session_by_incident(iid: str):
-    ms = [s for s in _load_sessions() if s["incident_id"] == iid]
+    ms = [s for s in _read_sessions() if s["incident_id"] == iid]
     return sorted(ms, key=lambda s: s["created_at"], reverse=True)[0] if ms else None
 
 

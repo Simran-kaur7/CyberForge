@@ -1,9 +1,29 @@
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 FIREWALL_FILE = DATA_DIR / "simulated_firewall.json"
+
+# Strict IPv4 pattern: four groups of 1-3 digits, full string match
+_IPV4_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$")
+
+
+def _validate_ipv4(ip: str) -> bool:
+    """Return True only for valid IPv4 addresses (0-255 per octet)."""
+    if not isinstance(ip, str):
+        return False
+    m = _IPV4_RE.match(ip.strip())
+    if not m:
+        return False
+    for octet_str in m.groups():
+        try:
+            if int(octet_str) > 255:
+                return False
+        except (ValueError, TypeError):
+            return False
+    return True
 
 
 def block_ip(ip_address: str) -> dict:
@@ -13,6 +33,13 @@ def block_ip(ip_address: str) -> dict:
         return {
             "success": False,
             "error": "IP address is required"
+        }
+
+    # Strict IPv4 validation — reject malformed or out-of-range addresses
+    if not _validate_ipv4(ip_address):
+        return {
+            "success": False,
+            "error": "Invalid IP address format"
         }
 
     if FIREWALL_FILE.exists():

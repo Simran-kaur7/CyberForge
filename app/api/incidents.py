@@ -1,4 +1,22 @@
-from fastapi import APIRouter, HTTPException
+import logging
+import urllib.error
+
+try:
+    from fastapi import APIRouter
+except ImportError:  # pragma: no cover - keeps local tests working without FastAPI
+    class APIRouter:
+        def __init__(self, *args, **kwargs):
+            self.routes = []
+
+        def _decorator(self, *args, **kwargs):
+            def wrapper(func):
+                self.routes.append((args, kwargs, func))
+                return func
+            return wrapper
+
+        get = _decorator
+
+from app.api.approvals import HTTPException
 
 from app.sdk_client import (
     ToolTimeoutError,
@@ -8,8 +26,10 @@ from app.sdk_client import (
     find_session_by_incident,
     list_sessions,
     search_security_logs,
+    update_session,
 )
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["incidents"])
 
@@ -79,6 +99,25 @@ def investigate_incident(incident_id: str):
     else:
         local_session = create_session(incident_id, evidence_snapshot=analysis)
 
+    # Keep session metadata consistent with actual investigation
+    update_result = update_session(
+        local_session["id"],
+        evidence_snapshot=analysis,
+    )
+    if not update_result.get("success"):
+        # Session persistence is required because the investigation result is
+        # later used as the authoritative local session for approval actions.
+        # Do not report a complete investigation when that persistence failed.
+        logger.warning(
+            "Failed to update session %s metadata: %s",
+            local_session["id"],
+            update_result.get("error", "unknown"),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Investigation session could not be persisted.",
+        )
+
     local_session_id = local_session["id"]
 
     # Reuse existing TrueForge session if already linked, otherwise create new
@@ -110,8 +149,15 @@ def investigate_incident(incident_id: str):
                 cas_result = persist_trueforge_session_id(local_session_id, new_tf_id)
                 # Use the winning ID (another request may have set it first)
                 trueforge_session_id = cas_result.get("trueforge_session_id", new_tf_id)
-        except Exception:
-            pass  # TrueForge unavailable, local-only mode
+        except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, TimeoutError) as exc:
+            # Expected: TrueForge genuinely unavailable — operate in local-only mode
+            logger.info("TrueForge unavailable for session %s: %s", local_session_id, type(exc).__name__)
+        except (ValueError, KeyError) as exc:
+            # Unexpected: TrueForge returned something we can't parse
+            logger.warning("Unexpected TrueForge response for session %s: %s", local_session_id, type(exc).__name__)
+        except Exception as exc:
+            # Truly unexpected error — log so it doesn't disappear silently
+            logger.error("Unhandled TrueForge error for session %s: %s", local_session_id, exc, exc_info=True)
 
     return {
         "success": True,
