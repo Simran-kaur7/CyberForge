@@ -1267,6 +1267,340 @@ def run_all():
         }) is None, "Expired timestamp must not block"
     check("test_valid_expired_timestamp_does_not_block", t74)
 
+    # ------------------------------------------------------------------
+    # 75-93: Bug 1 (ownership token) + Bug 2 (retry) regression tests
+    # ------------------------------------------------------------------
+
+    # 75: First caller acquires forwarding claim with token
+    def t75():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-OWN-1")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-1")
+            assert br["success"] is True
+            assert br.get("pending_decision") == "approved"
+            token = br.get("forwarding_owner")
+            assert token is not None and len(token) > 0
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarding_owner") == token
+    check("test_first_caller_acquires_claim_with_token", t75)
+
+    # 76: Second concurrent caller receives already_forwarding
+    def t76():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-OWN-2")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            # First caller acquires claim
+            br1 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-2")
+            assert br1.get("pending_decision") == "approved"
+            # Second caller gets already_forwarding
+            br2 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-2")
+            assert br2.get("already_forwarding") is True
+            assert "pending_decision" not in br2
+    check("test_second_caller_receives_already_forwarding", t76)
+
+    # 77: Second caller does NOT receive pending_decision
+    def t77():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-OWN-3")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            sdk_client.set_approval_tool_call_id(sid, aid, "tc-3")
+            br2 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-3")
+            assert br2.get("pending_decision") is None
+    check("test_second_caller_no_pending_decision", t77)
+
+    # 78: Second caller cannot release first caller's claim
+    def t78():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-OWN-4")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br1 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-4")
+            token1 = br1["forwarding_owner"]
+            # Second caller tries to release with wrong token
+            rr = sdk_client.release_forwarding_claim(
+                sid, aid, "fail", owner_token="wrong-token"
+            )
+            assert rr["success"] is False
+            assert "another caller" in rr["error"].lower()
+            # First caller's claim is still intact
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarding_owner") == token1
+    check("test_non_owner_cannot_release_claim", t78)
+
+    # 79: First caller can successfully complete its claim
+    def t79():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-OWN-5")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-5")
+            token = br["forwarding_owner"]
+            cr = sdk_client.complete_forwarding(sid, aid, owner_token=token)
+            assert cr["success"] is True
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarded_to_trueforge") is True
+            assert act.get("forwarding_to_trueforge") is False
+            assert act.get("forwarding_owner") is None
+    check("test_owner_can_complete_claim", t79)
+
+    # 80: Failed owner can release its own claim
+    def t80():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-OWN-6")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-6")
+            token = br["forwarding_owner"]
+            rr = sdk_client.release_forwarding_claim(
+                sid, aid, "timeout", owner_token=token
+            )
+            assert rr["success"] is True
+            assert rr["retryable"] is True
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarding_to_trueforge") is False
+            assert act.get("forwarding_owner") is None
+    check("test_owner_can_release_own_claim", t80)
+
+    # 81: Retry can reclaim the original approved action
+    def t81():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RTRY-1")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            # Simulate failed forwarding
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-r1")
+            sdk_client.release_forwarding_claim(sid, aid, "fail", owner_token=br["forwarding_owner"])
+            # Retry: should work on the same terminal action
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-r1")
+            assert rr["success"] is True
+            assert rr.get("pending_decision") == "approved"
+            assert rr.get("forwarding_owner") is not None
+    check("test_retry_reclaims_approved_action", t81)
+
+    # 82: Retry can reclaim the original rejected action
+    def t82():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RTRY-2")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.reject_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-r2")
+            sdk_client.release_forwarding_claim(sid, aid, "fail", owner_token=br["forwarding_owner"])
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-r2")
+            assert rr["success"] is True
+            assert rr.get("pending_decision") == "rejected"
+    check("test_retry_reclaims_rejected_action", t82)
+
+    # 83: Retry preserves original action_id
+    def t83():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RTRY-3")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-r3")
+            assert rr["success"] is True
+            assert rr["action_id"] == aid
+    check("test_retry_preserves_action_id", t83)
+
+    # 84: Retry preserves original tool_call_id
+    def t84():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RTRY-4")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            # Bind tool_call_id first
+            sdk_client.set_approval_tool_call_id(sid, aid, "tc-r4")
+            # Retry with matching tool_call_id
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-r4")
+            assert rr["success"] is True
+            # Mismatched tool_call_id rejected
+            rr2 = sdk_client.retry_approval_forwarding(sid, aid, "tc-wrong")
+            assert rr2["success"] is False
+            assert "tool_call_id" in rr2["error"].lower()
+    check("test_retry_preserves_tool_call_id", t84)
+
+    # 85: Retry preserves original decision
+    def t85():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RTRY-5")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-r5")
+            assert rr.get("pending_decision") == "approved"
+            # Verify session still shows approved
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["status"] == "approved"
+    check("test_retry_preserves_decision", t85)
+
+    # 86: Retry does NOT create a new approval action
+    def t86():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RTRY-6")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            original_count = len(s["actions"])
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            sdk_client.retry_approval_forwarding(sid, aid, "tc-r6")
+            sess = sdk_client.get_session(sid)
+            assert len(sess["actions"]) == original_count, "Retry must not create new actions"
+    check("test_retry_no_new_action", t86)
+
+    # 87: Two concurrent retries cannot both forward
+    def t87():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RTRY-7")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            rr1 = sdk_client.retry_approval_forwarding(sid, aid, "tc-r7")
+            assert rr1.get("pending_decision") == "approved"
+            rr2 = sdk_client.retry_approval_forwarding(sid, aid, "tc-r7")
+            assert rr2.get("already_forwarding") is True
+            assert "pending_decision" not in rr2
+    check("test_concurrent_retries_one_wins", t87)
+
+    # 88: Superseded action cannot be retried
+    def t88():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RTRY-8")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.update_session(sid, supersede_stale_approval=True, evidence_snapshot={"x": 1})
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-r8")
+            assert rr["success"] is False
+            assert "superseded" in rr["error"].lower()
+    check("test_superseded_cannot_retry", t88)
+
+    # 89: Mismatched tool_call_id is rejected by retry
+    def t89():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RTRY-9")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "wrong-tc")
+            assert rr["success"] is False
+    check("test_retry_rejects_mismatched_tool_call_id", t89)
+
+    # 90: forwarded_to_trueforge=True prevents another forward via retry
+    def t90():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RTRY-10")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-r10")
+            sdk_client.complete_forwarding(sid, aid, owner_token=br["forwarding_owner"])
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-r10")
+            assert rr["success"] is False
+            assert "already forwarded" in rr["error"].lower()
+    check("test_forwarded_blocks_retry", t90)
+
+    # 91: Existing normal approval flow still passes
+    def t91():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-OWN-7")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            pr = sdk_client.prepare_decision(sid, aid, "approved")
+            assert pr["success"] is True
+            cr = sdk_client.complete_decision(sid, aid, pr["token"])
+            assert cr["success"] is True
+            assert cr["status"] == "approved"
+    check("test_normal_approval_flow_intact", t91)
+
+    # 92: Existing late-forward flow still passes
+    def t92():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-OWN-8")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-lf")
+            assert br.get("pending_decision") == "approved"
+            token = br["forwarding_owner"]
+            sdk_client.complete_forwarding(sid, aid, owner_token=token)
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarded_to_trueforge") is True
+    check("test_late_forward_flow_intact", t92)
+
+    # 93: Existing crash-recovery behavior still passes
+    def t93():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-OWN-9")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-cr")
+            token = br["forwarding_owner"]
+            # Simulate crash: release claim
+            sdk_client.release_forwarding_claim(sid, aid, "crash", owner_token=token)
+            # Retry
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-cr")
+            assert rr.get("pending_decision") == "approved"
+            sdk_client.complete_forwarding(sid, aid, owner_token=rr["forwarding_owner"])
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarded_to_trueforge") is True
+    check("test_crash_recovery_with_tokens", t93)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:

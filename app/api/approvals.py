@@ -287,6 +287,7 @@ def request_containment_approval(
             persist_trueforge_session_id,
             release_forwarding_claim,
             complete_forwarding,
+            retry_approval_forwarding,
             release_request_claim,
         )
 
@@ -429,26 +430,80 @@ def request_containment_approval(
                 }
 
         late_forward = None
+        forwarding_owner_token = None
 
         if tool_call_id:
-            cas_result = set_approval_tool_call_id(
-                local_session_id,
-                action_id,
-                tool_call_id,
-                thread_id=thread_id,
+            # Check if the action is already terminal (approved/rejected)
+            # — this is a retry of a previous late-forward failure.
+            session_data = get_session(local_session_id)
+            existing_action = None
+            if session_data:
+                for a in session_data.get("actions", []):
+                    if a.get("action_id") == action_id:
+                        existing_action = a
+                        break
+
+            is_retry = (
+                existing_action is not None
+                and existing_action.get("status") in ("approved", "rejected")
+                and existing_action.get("tool_call_id") == tool_call_id
+                and not existing_action.get("forwarded_to_trueforge")
             )
 
-            if not cas_result.get("success"):
-                raise HTTPException(
-                    status_code=409,
-                    detail=cas_result.get(
-                        "error",
-                        "Could not bind tool call",
-                    ),
+            if is_retry:
+                # Retry the original terminal action's forwarding.
+                retry_result = retry_approval_forwarding(
+                    local_session_id, action_id, tool_call_id,
+                )
+                if retry_result.get("success"):
+                    if retry_result.get("already_forwarding"):
+                        return {
+                            "success": True,
+                            "action_id": action_id,
+                            "session_id": local_session_id,
+                            "trueforge_session_id": tf_session_id,
+                            "tool_call_id": tool_call_id,
+                            "already_forwarding": True,
+                        }
+                    late_forward = retry_result
+                    forwarding_owner_token = retry_result.get("forwarding_owner")
+                elif retry_result.get("error"):
+                    # Forwarding already complete or action not retryable.
+                    raise HTTPException(
+                        status_code=409,
+                        detail=retry_result["error"],
+                    )
+            else:
+                # Normal path: bind tool_call_id and enter late-forward.
+                cas_result = set_approval_tool_call_id(
+                    local_session_id,
+                    action_id,
+                    tool_call_id,
+                    thread_id=thread_id,
                 )
 
-            if cas_result.get("pending_decision"):
-                late_forward = cas_result
+                if not cas_result.get("success"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=cas_result.get(
+                            "error",
+                            "Could not bind tool call",
+                        ),
+                    )
+
+                if cas_result.get("already_forwarding"):
+                    return {
+                        "success": True,
+                        "action_id": action_id,
+                        "session_id": local_session_id,
+                        "trueforge_session_id": tf_session_id,
+                        "tool_call_id": tool_call_id,
+                        "already_forwarding": True,
+                    }
+
+                if cas_result.get("pending_decision"):
+                    late_forward = cas_result
+                    forwarding_owner_token = cas_result.get("forwarding_owner")
 
         if late_forward and tf_session_id and tool_call_id:
             decision = late_forward["pending_decision"]
@@ -478,13 +533,17 @@ def request_containment_approval(
 
                 # TrueForge accepted the decision — finalize the
                 # forwarding state so a crash-restart cannot re-forward.
-                complete_forwarding(local_session_id, action_id)
+                complete_forwarding(
+                    local_session_id, action_id,
+                    owner_token=forwarding_owner_token,
+                )
 
             except RuntimeError:
                 release_forwarding_claim(
                     local_session_id,
                     action_id,
                     "Late-forward decision failed",
+                    owner_token=forwarding_owner_token,
                 )
 
                 return {

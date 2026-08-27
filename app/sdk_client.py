@@ -945,22 +945,35 @@ def set_approval_tool_call_id(
                 for action in s.get("actions", []):
                     if action.get("action_id") == action_id:
                         # Use forwarding_to_trueforge as a recoverable
-                        # claim.  forwarded_to_trueforge is only set after
-                        # the TrueForge API call succeeds, so a crash
-                        # during forwarding leaves the decision retryable.
+                        # claim with an ownership token.  forwarded_to_trueforge
+                        # is only set after the TrueForge API call succeeds,
+                        # so a crash during forwarding leaves the decision
+                        # retryable.
                         if action.get("forwarded_to_trueforge"):
                             return {
                                 "success": True,
                                 "action_id": action_id,
                                 "already_forwarded": True,
                             }
-                        if not action.get("forwarding_to_trueforge"):
-                            action["forwarding_to_trueforge"] = True
+                        existing_owner = action.get("forwarding_owner")
+                        if action.get("forwarding_to_trueforge"):
+                            # Another caller already holds the claim.
+                            return {
+                                "success": True,
+                                "action_id": action_id,
+                                "already_forwarding": True,
+                                "forwarding_owner": existing_owner,
+                            }
+                        # First caller: atomically acquire the claim.
+                        token = str(uuid.uuid4())
+                        action["forwarding_to_trueforge"] = True
+                        action["forwarding_owner"] = token
                         return {
                             "success": True,
                             "action_id": action_id,
                             "pending_decision": current_status,
                             "decided_by": action.get("decided_by"),
+                            "forwarding_owner": token,
                         }
 
             return {"success": True, "action_id": action_id}
@@ -970,11 +983,15 @@ def set_approval_tool_call_id(
     return _mutate_sessions(_set)
 
 
-def release_forwarding_claim(sid: str, action_id: str, error: str) -> dict:
+def release_forwarding_claim(sid: str, action_id: str, error: str, owner_token: str | None = None) -> dict:
     """Release a late-forward claim after an upstream delivery failure.
 
     Clears both ``forwarding_to_trueforge`` and ``forwarded_to_trueforge``
     so the decision can be retried on the next TrueForge response.
+
+    If ``owner_token`` is provided, only the claim owner can release it.
+    A non-owner release is rejected to prevent one caller from clearing
+    another caller's active forwarding claim.
     """
     def _release(sessions):
         for s in sessions:
@@ -982,8 +999,15 @@ def release_forwarding_claim(sid: str, action_id: str, error: str) -> dict:
                 continue
             for action in s.get("actions", []):
                 if action.get("action_id") == action_id:
+                    if owner_token and action.get("forwarding_owner") != owner_token:
+                        return {
+                            "success": False,
+                            "error": "Forwarding claim belongs to another caller",
+                            "retryable": False,
+                        }
                     action["forwarding_to_trueforge"] = False
                     action["forwarded_to_trueforge"] = False
+                    action.pop("forwarding_owner", None)
                     action["forward_error"] = error
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
                     return {"success": True, "action_id": action_id, "retryable": True}
@@ -992,7 +1016,7 @@ def release_forwarding_claim(sid: str, action_id: str, error: str) -> dict:
     return _mutate_sessions(_release)
 
 
-def complete_forwarding(sid: str, action_id: str) -> dict:
+def complete_forwarding(sid: str, action_id: str, owner_token: str | None = None) -> dict:
     """Transition forwarding_to_trueforge -> forwarded_to_trueforge
     after the TrueForge API call succeeds.
 
@@ -1000,6 +1024,8 @@ def complete_forwarding(sid: str, action_id: str) -> dict:
     and this call leaves the decision retryable: forwarding_to_trueforge is True
     but forwarded_to_trueforge is False, so the next call re-enters the late-forward
     path instead of suppressing it.
+
+    If ``owner_token`` is provided, only the claim owner can complete it.
     """
     def _complete(sessions):
         for s in sessions:
@@ -1007,14 +1033,103 @@ def complete_forwarding(sid: str, action_id: str) -> dict:
                 continue
             for action in s.get("actions", []):
                 if action.get("action_id") == action_id:
+                    if owner_token and action.get("forwarding_owner") != owner_token:
+                        return {
+                            "success": False,
+                            "error": "Forwarding claim belongs to another caller",
+                        }
                     action["forwarding_to_trueforge"] = False
                     action["forwarded_to_trueforge"] = True
+                    action.pop("forwarding_owner", None)
                     action.pop("forward_error", None)
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
                     return {"success": True, "action_id": action_id}
             return {"success": False, "error": "Action not found"}
         return {"success": False, "error": "Session not found"}
     return _mutate_sessions(_complete)
+
+
+def retry_approval_forwarding(
+    sid: str,
+    action_id: str,
+    tool_call_id: str,
+) -> dict:
+    """Re-enter the late-forward path for an already terminal action.
+
+    When a late-forward fails and the caller retries, this function:
+
+    1. Locates the original approved/rejected action.
+    2. Verifies the tool_call_id matches.
+    3. Verifies forwarded_to_trueforge is False (not yet delivered).
+    4. Atomically acquires a forwarding claim with a new owner token.
+    5. Returns the decision and token needed by approvals.py.
+
+    A new approval action is never created.  The original terminal action
+    is reused so the decision and tool_call_id remain bound.
+    """
+    def _retry(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+
+            # Locate the action in the session's action history.
+            target = None
+            for action in s.get("actions", []):
+                if action.get("action_id") == action_id:
+                    target = action
+                    break
+
+            if target is None:
+                return {"success": False, "error": "Action not found"}
+
+            status = target.get("status")
+            if status not in ("approved", "rejected"):
+                return {
+                    "success": False,
+                    "error": (
+                        f"Cannot retry forwarding for action with status "
+                        f"'{status}' — must be approved or rejected"
+                    ),
+                }
+
+            if target.get("tool_call_id") != tool_call_id:
+                return {
+                    "success": False,
+                    "error": "tool_call_id does not match the original action",
+                }
+
+            if target.get("forwarded_to_trueforge"):
+                return {
+                    "success": False,
+                    "error": "Decision was already forwarded to TrueForge",
+                }
+
+            existing_owner = target.get("forwarding_owner")
+            if target.get("forwarding_to_trueforge") and existing_owner:
+                return {
+                    "success": True,
+                    "action_id": action_id,
+                    "already_forwarding": True,
+                    "forwarding_owner": existing_owner,
+                }
+
+            # Atomically acquire forwarding claim.
+            token = str(uuid.uuid4())
+            target["forwarding_to_trueforge"] = True
+            target["forwarding_owner"] = token
+            target.pop("forward_error", None)
+            s["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            return {
+                "success": True,
+                "action_id": action_id,
+                "pending_decision": status,
+                "decided_by": target.get("decided_by", "analyst"),
+                "forwarding_owner": token,
+            }
+
+        return {"success": False, "error": "Session not found"}
+    return _mutate_sessions(_retry)
 
 
 def persist_trueforge_session_id(sid: str, tf_session_id: str) -> dict:
