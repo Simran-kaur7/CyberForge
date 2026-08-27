@@ -10,7 +10,6 @@ CyberForge SDK Client — Tool Runner, Session & Approval Management
 import hashlib
 import os
 import platform
-import re
 import sys
 from contextlib import contextmanager
 
@@ -47,6 +46,16 @@ REQUEST_CLAIM_TIMEOUT_SECONDS = 300  # 5 minutes
 # Lease timeout for forwarding_to_trueforge claims.  A crashed owner's
 # forwarding claim must not block retries indefinitely.
 FORWARDING_CLAIM_TIMEOUT_SECONDS = 300  # 5 minutes
+
+# Number of shared forwarding-lock fence files. sid+action_id pairs are
+# hashed into this fixed-size pool instead of getting a unique file each,
+# so lock-file count stays bounded no matter how many approval actions
+# have ever been created (action_id is a fresh uuid4 every time, so a
+# 1:1 mapping would grow forever). Deleting a lock file after use isn't
+# safe here since retry_approval_forwarding can re-enter the same
+# action_id's fence later, and unlinking risks the classic unlink-race
+# where a waiter still holds the old inode.
+FORWARDING_LOCK_BUCKETS = 256
 
 # Tracks how many threads currently hold DATA_DIR/.sessions.lock.
 # Used to prove TrueForge network I/O never runs under the global lock.
@@ -244,39 +253,22 @@ def _read_sessions() -> list:
             fd.close()
 
 
-def _validate_lock_component(value: str, field: str) -> str:
-    """Validate untrusted lock path components before filesystem use."""
-    if not isinstance(value, str):
-        raise ValueError(f"Invalid {field}")
-    if not value or len(value) > 128:
-        raise ValueError(f"Invalid {field}")
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", value):
-        raise ValueError(f"Invalid {field}")
-    if value in {".", ".."}:
-        raise ValueError(f"Invalid {field}")
-    return value
-
-
-def forwarding_lock_filename(sid: str, action_id: str) -> str:
-    """Stable, filesystem-safe name for a per-action forwarding fence."""
-    raw = f"{sid}\x1f{action_id}"
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    return f"action_{digest}.lock"
-
-
 def forwarding_lock_path(sid: str, action_id: str) -> Path:
-    """Lock file identity for one CyberForge approval action's TrueForge forward."""
-    sid_safe = _validate_lock_component(sid, "session_id")
-    action_id_safe = _validate_lock_component(action_id, "action_id")
+    """Shared lock-file identity for one CyberForge approval action's TrueForge forward.
+
+    Maps (sid, action_id) onto a fixed-size pool of fence files via a stable
+    hash, rather than minting a unique file per action. The file's contents
+    are never read — it exists only to be flock()'d — so two unrelated
+    actions occasionally sharing a bucket just means a brief, harmless
+    serialization between their (short, infrequent) forwarding operations.
+    This keeps forwarding_locks/ bounded at FORWARDING_LOCK_BUCKETS files
+    regardless of how many approval actions the process has ever handled.
+    """
     lock_dir = DATA_DIR / "forwarding_locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_dir_resolved = lock_dir.resolve()
-    candidate = (lock_dir_resolved / forwarding_lock_filename(sid_safe, action_id_safe)).resolve()
-    try:
-        candidate.relative_to(lock_dir_resolved)
-    except ValueError:
-        raise ValueError("Invalid forwarding lock path")
-    return candidate
+    digest = hashlib.sha256(f"{sid}_{action_id}".encode("utf-8")).hexdigest()
+    bucket = int(digest, 16) % FORWARDING_LOCK_BUCKETS
+    return lock_dir / f"bucket_{bucket:04d}.lock"
 
 
 @contextmanager
@@ -368,13 +360,31 @@ def request_approval(sid: str, atype: str, adetail: dict) -> dict:
                     == adetail.get("incident_id")
                     and not existing.get("tool_call_id")
                 ):
-                    # Check if another concurrent request is actively forwarding to TrueForge
+                    # Check if another concurrent request is actively forwarding to
+                    # TrueForge. A stale claim (owner crashed before releasing it)
+                    # must not block approval forever — treat an expired lease as
+                    # abandoned, same as _has_active_approval_operation() does.
                     if existing.get("request_in_flight"):
-                        return {
-                            "success": False,
-                            "error": "A request to TrueForge is already in flight for this approval action",
-                            "in_flight": True,
-                        }
+                        request_started = existing.get("request_started_at")
+                        claim_expired = True
+                        if request_started and isinstance(request_started, str):
+                            try:
+                                started = datetime.fromisoformat(
+                                    request_started.replace("Z", "+00:00")
+                                )
+                                age_seconds = (
+                                    datetime.now(timezone.utc) - started
+                                ).total_seconds()
+                                claim_expired = age_seconds > REQUEST_CLAIM_TIMEOUT_SECONDS
+                            except (TypeError, ValueError):
+                                claim_expired = True
+                        if not claim_expired:
+                            return {
+                                "success": False,
+                                "error": "A request to TrueForge is already in flight for this approval action",
+                                "in_flight": True,
+                            }
+                        # Lease expired — fall through and reclaim the stale claim.
 
                     # Atomically claim the request forward
                     now_claim = datetime.now(timezone.utc).isoformat()
@@ -710,6 +720,9 @@ def approve_action(
                 return {"success": False, "error": "No matching pending approval"}
             if current.get("status") != "pending":
                 return {"success": False, "error": f"Action already {current.get('status')}"}
+            active_reason = _has_active_approval_operation(s)
+            if active_reason:
+                return {"success": False, "error": active_reason}
             valid, error = _validate_decision_ids(
                 s, current, expected_tool_call_id, expected_trueforge_session_id
             )
@@ -756,6 +769,9 @@ def reject_action(
                 return {"success": False, "error": "No matching pending approval"}
             if current.get("status") != "pending":
                 return {"success": False, "error": f"Action already {current.get('status')}"}
+            active_reason = _has_active_approval_operation(s)
+            if active_reason:
+                return {"success": False, "error": active_reason}
             valid, error = _validate_decision_ids(
                 s, current, expected_tool_call_id, expected_trueforge_session_id
             )
@@ -1267,6 +1283,8 @@ def retry_approval_forwarding(
 
 def persist_trueforge_session_id(sid: str, tf_session_id: str) -> dict:
     """Atomically persist a TrueForge session ID on the local session."""
+    if not tf_session_id or not isinstance(tf_session_id, str):
+        return {"success": False, "error": "tf_session_id must be a non-empty string"}
     def _persist(sessions):
         for s in sessions:
             if s["id"] != sid:
