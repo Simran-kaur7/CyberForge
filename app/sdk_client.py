@@ -34,8 +34,12 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = PROJECT_ROOT / "mcp_server" / "tools"
-DATA_DIR = PROJECT_ROOT / "mcp_server" / "data"
-SESSIONS_FILE = DATA_DIR / "sessions.json"
+DATA_DIR = Path(
+    os.environ.get("CYBERFORGE_DATA_DIR", PROJECT_ROOT / "mcp_server" / "data")
+)
+SESSIONS_FILE = Path(
+    os.environ.get("CYBERFORGE_SESSIONS_FILE", DATA_DIR / "sessions.json")
+)
 
 TOOL_TIMEOUT_SECONDS = 15
 MAX_ERROR_OUTPUT = 500

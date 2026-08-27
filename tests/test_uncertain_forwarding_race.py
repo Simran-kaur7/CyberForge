@@ -9,8 +9,28 @@ import multiprocessing
 import threading
 import time
 
+import pytest
+
 from app import sdk_client
 import app.api.approvals as approvals
+
+
+@pytest.fixture(autouse=True)
+def isolate_runtime_persistence(tmp_path, monkeypatch):
+    """Keep every test and spawned worker out of the application's data store."""
+    data_dir = tmp_path / "data"
+    sessions_file = data_dir / "sessions.json"
+
+    monkeypatch.setenv("CYBERFORGE_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("CYBERFORGE_SESSIONS_FILE", str(sessions_file))
+
+    # The parent pytest process already imported sdk_client before the fixture
+    # ran, so point its module globals at the same temporary paths. Spawned
+    # workers re-import sdk_client and pick up the environment variables above.
+    monkeypatch.setattr(sdk_client, "DATA_DIR", data_dir)
+    monkeypatch.setattr(sdk_client, "SESSIONS_FILE", sessions_file)
+
+    data_dir.mkdir(parents=True, exist_ok=True)
 def _prepare_uncertain_action():
     session = sdk_client.create_session("INC-RACE")
     sid = session["id"]
