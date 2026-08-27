@@ -7,9 +7,12 @@ CyberForge SDK Client — Tool Runner, Session & Approval Management
 4. Local JSON persistence with file locking
 """
 
+import hashlib
 import os
 import platform
+import re
 import sys
+from contextlib import contextmanager
 
 if platform.system() == "Windows":
     import msvcrt
@@ -44,6 +47,10 @@ REQUEST_CLAIM_TIMEOUT_SECONDS = 300  # 5 minutes
 # Lease timeout for forwarding_to_trueforge claims.  A crashed owner's
 # forwarding claim must not block retries indefinitely.
 FORWARDING_CLAIM_TIMEOUT_SECONDS = 300  # 5 minutes
+
+# Tracks how many threads currently hold DATA_DIR/.sessions.lock.
+# Used to prove TrueForge network I/O never runs under the global lock.
+_sessions_lock_depth = 0
 
 
 class ToolTimeoutError(RuntimeError):
@@ -152,20 +159,29 @@ def _save_sessions(sessions: list) -> None:
         raise
 
 
+def sessions_lock_held() -> bool:
+    """Return True if this process currently holds .sessions.lock."""
+    return _sessions_lock_depth > 0
+
+
 def _mutate_sessions(fn):
     """Load, apply fn, save — under an exclusive file lock."""
+    global _sessions_lock_depth
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     lock_path = DATA_DIR / ".sessions.lock"
     lock_path.touch(exist_ok=True)
     fd = open(lock_path, "r+")
     try:
         _lock_file(fd)
+        _sessions_lock_depth += 1
         sessions = _load_sessions()
         result = fn(sessions)
         _save_sessions(sessions)
         return result
     finally:
         try:
+            if _sessions_lock_depth:
+                _sessions_lock_depth -= 1
             _unlock_file(fd)
         finally:
             fd.close()
@@ -210,13 +226,57 @@ def create_session(
 
 def _read_sessions() -> list:
     """Read sessions under the file lock for a consistent snapshot."""
+    global _sessions_lock_depth
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     lock_path = DATA_DIR / ".sessions.lock"
     lock_path.touch(exist_ok=True)
     fd = open(lock_path, "r+")
     try:
         _lock_file(fd)
+        _sessions_lock_depth += 1
         return _load_sessions()
+    finally:
+        try:
+            if _sessions_lock_depth:
+                _sessions_lock_depth -= 1
+            _unlock_file(fd)
+        finally:
+            fd.close()
+
+
+def forwarding_lock_filename(sid: str, action_id: str) -> str:
+    """Stable, filesystem-safe name for a per-action forwarding fence."""
+    raw = f"{sid}_{action_id}"
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", raw)
+    if not safe or safe in {".", ".."}:
+        safe = "action"
+    if len(safe) > 120:
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        safe = f"{safe[:80]}_{digest}"
+    return f"{safe}.lock"
+
+
+def forwarding_lock_path(sid: str, action_id: str) -> Path:
+    """Lock file identity for one CyberForge approval action's TrueForge forward."""
+    lock_dir = DATA_DIR / "forwarding_locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir / forwarding_lock_filename(sid, action_id)
+
+
+@contextmanager
+def forwarding_action_lock(sid: str, action_id: str):
+    """Exclusive per-action fence. Must not be held around unrelated sessions I/O.
+
+    Claim, reclaim, TrueForge dispatch, complete, and release for the same
+    ``session_id`` + ``action_id`` all serialize on this lock. The global
+    ``.sessions.lock`` is acquired only for short durable reads/writes inside.
+    """
+    path = forwarding_lock_path(sid, action_id)
+    path.touch(exist_ok=True)
+    fd = open(path, "r+")
+    try:
+        _lock_file(fd)
+        yield path
     finally:
         try:
             _unlock_file(fd)
@@ -1003,7 +1063,38 @@ def set_approval_tool_call_id(
 
         return {"success": False, "error": "Session not found"}
 
-    return _mutate_sessions(_set)
+    with forwarding_action_lock(sid, action_id):
+        return _mutate_sessions(_set)
+
+
+def _release_forwarding_claim_unlocked(
+    sid: str, action_id: str, error: str, owner_token: str | None = None
+) -> dict:
+    """Release a forwarding claim. Caller must hold the per-action fence."""
+
+    def _release(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+            for action in s.get("actions", []):
+                if action.get("action_id") == action_id:
+                    if owner_token and action.get("forwarding_owner") != owner_token:
+                        return {
+                            "success": False,
+                            "error": "Forwarding claim belongs to another caller",
+                            "retryable": False,
+                        }
+                    action["forwarding_to_trueforge"] = False
+                    action["forwarded_to_trueforge"] = False
+                    action.pop("forwarding_owner", None)
+                    action.pop("forwarding_started_at", None)
+                    action["forward_error"] = error
+                    s["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    return {"success": True, "action_id": action_id, "retryable": True}
+            return {"success": False, "error": "Action not found"}
+        return {"success": False, "error": "Session not found"}
+
+    return _mutate_sessions(_release)
 
 
 def release_forwarding_claim(sid: str, action_id: str, error: str, owner_token: str | None = None) -> dict:
