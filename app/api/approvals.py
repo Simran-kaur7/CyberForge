@@ -311,6 +311,7 @@ def request_containment_approval(
             release_request_claim,
             mark_forwarding_dispatched,
             mark_forwarding_uncertain,
+            forwarding_action_lock,
         )
 
         session = get_session(body.session_id)
@@ -551,80 +552,80 @@ def request_containment_approval(
             if thread_id:
                 approval_input["thread_id"] = thread_id
 
-            # Durably record that a dispatch is about to be attempted
-            # *before* making the network call. This is what lets a
-            # restart after a crash tell "the POST may have gone out" apart
-            # from "the POST was never attempted" — see
-            # mark_forwarding_dispatched() for why this ordering matters.
-            dispatch_marked = mark_forwarding_dispatched(
-                local_session_id, action_id, owner_token=forwarding_owner_token,
-            )
-            if not dispatch_marked.get("success"):
-                # Another caller already reclaimed this lease — we no
-                # longer own the claim, so we must not dispatch under it.
-                raise HTTPException(
-                    status_code=409,
-                    detail=dispatch_marked.get(
-                        "error", "Forwarding claim was lost before dispatch",
-                    ),
+            with forwarding_action_lock(local_session_id, action_id):
+                # Durably record that a dispatch is about to be attempted
+                # *before* making the network call. This is what lets a
+                # restart after a crash tell "the POST may have gone out" apart
+                # from "the POST was never attempted" — see
+                # mark_forwarding_dispatched() for why this ordering matters.
+                dispatch_marked = mark_forwarding_dispatched(
+                    local_session_id, action_id, owner_token=forwarding_owner_token,
                 )
-
-            try:
-                _tf_post_sse(
-                    f"/api/v1/sessions/{tf_session_id}/turns",
-                    {"input": [approval_input]},
-                )
-
-                # TrueForge accepted the decision — finalize the
-                # forwarding state so a crash-restart cannot re-forward.
-                complete_forwarding(
-                    local_session_id, action_id,
-                    owner_token=forwarding_owner_token,
-                )
-
-            except Exception:
-                # The dispatch marker was durably written immediately before the
-                # POST. From this point onward, a timeout/reset/read failure may
-                # mean TrueForge already accepted the decision. Do NOT release
-                # the forwarding claim or clear forwarding_dispatched_at, or a
-                # normal retry could submit the same decision twice.
-                logger.exception(
-                    "Late-forward decision failed after dispatch for session=%s "
-                    "action=%s tool_call_id=%s",
-                    local_session_id,
-                    action_id,
-                    tool_call_id,
-                )
-
-                mark_result = mark_forwarding_uncertain(
-                    local_session_id,
-                    action_id,
-                    "Late-forward decision outcome is uncertain",
-                    owner_token=forwarding_owner_token,
-                )
-                if not mark_result.get("success"):
-                    logger.error(
-                        "Could not persist uncertain forwarding state for session=%s "
-                        "action=%s: %s",
-                        local_session_id,
-                        action_id,
-                        mark_result.get("error", "unknown error"),
+                if not dispatch_marked.get("success"):
+                    # Another caller already reclaimed this lease — we no
+                    # longer own the claim, so we must not dispatch under it.
+                    raise HTTPException(
+                        status_code=409,
+                        detail=dispatch_marked.get(
+                            "error", "Forwarding claim was lost before dispatch",
+                        ),
                     )
 
-                return {
-                    "success": False,
-                    "action_id": action_id,
-                    "session_id": local_session_id,
-                    "trueforge_session_id": tf_session_id,
-                    "tool_call_id": tool_call_id,
-                    "thread_id": thread_id,
-                    "analyst": analyst,
-                    "trueforge_event": tf_event,
-                    "error": "Late-forward decision outcome is uncertain; manual verification required.",
-                    "uncertain_delivery": True,
-                    "retryable": False,
-                }
+                try:
+                    _tf_post_sse(
+                        f"/api/v1/sessions/{tf_session_id}/turns",
+                        {"input": [approval_input]},
+                    )
 
+                    # TrueForge accepted the decision — finalize the
+                    # forwarding state so a crash-restart cannot re-forward.
+                    complete_forwarding(
+                        local_session_id, action_id,
+                        owner_token=forwarding_owner_token,
+                    )
+
+                except Exception:
+                    # The dispatch marker was durably written immediately before the
+                    # POST. From this point onward, a timeout/reset/read failure may
+                    # mean TrueForge already accepted the decision. Do NOT release
+                    # the forwarding claim or clear forwarding_dispatched_at, or a
+                    # normal retry could submit the same decision twice.
+                    logger.exception(
+                        "Late-forward decision failed after dispatch for session=%s "
+                        "action=%s tool_call_id=%s",
+                        local_session_id,
+                        action_id,
+                        tool_call_id,
+                    )
+
+                    mark_result = mark_forwarding_uncertain(
+                        local_session_id,
+                        action_id,
+                        "Late-forward decision outcome is uncertain",
+                        owner_token=forwarding_owner_token,
+                    )
+                    if not mark_result.get("success"):
+                        logger.error(
+                            "Could not persist uncertain forwarding state for session=%s "
+                            "action=%s: %s",
+                            local_session_id,
+                            action_id,
+                            mark_result.get("error", "unknown error"),
+                        )
+
+                    return {
+                        "success": False,
+                        "action_id": action_id,
+                        "session_id": local_session_id,
+                        "trueforge_session_id": tf_session_id,
+                        "tool_call_id": tool_call_id,
+                        "thread_id": thread_id,
+                        "analyst": analyst,
+                        "trueforge_event": tf_event,
+                        "error": "Late-forward decision outcome is uncertain; manual verification required.",
+                        "uncertain_delivery": True,
+                        "retryable": False,
+                    }
         return {
             "success": True,
             "action_id": action_id,
