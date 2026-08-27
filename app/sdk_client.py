@@ -153,7 +153,10 @@ def _save_sessions(sessions: list) -> None:
     """Atomically write sessions: write to a temp file, then rename."""
     import tempfile
 
-    sessions_dir = SESSIONS_FILE.parent
+    # Resolve symlinks so os.replace() updates the real target instead
+    # of replacing the configured symlink itself.
+    effective_sessions_file = SESSIONS_FILE.resolve(strict=False)
+    sessions_dir = effective_sessions_file.parent
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
     tmp_fd, tmp_path = tempfile.mkstemp(
@@ -164,8 +167,16 @@ def _save_sessions(sessions: list) -> None:
             f.write(json.dumps(sessions, indent=2, default=str))
             f.flush()
             os.fsync(f.fileno())
-        # Atomic replace (on same filesystem)
-        os.replace(tmp_path, str(SESSIONS_FILE))
+
+        # Atomic replace of the resolved target, preserving the symlink.
+        os.replace(tmp_path, str(effective_sessions_file))
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     except Exception:
         # Clean up temp file on failure
         try:
