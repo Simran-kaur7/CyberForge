@@ -168,7 +168,19 @@ def _mutate_sessions(fn):
 # Session Management
 # ---------------------------------------------------------------------------
 
-def create_session(incident_id: str, evidence_snapshot=None) -> dict:
+def create_session(
+    incident_id: str,
+    evidence_snapshot=None,
+    risk_score=None,
+    **metadata,
+) -> dict:
+    """Create a session, populated with all investigation state up front.
+
+    ``risk_score`` and any extra ``metadata`` (e.g. ``target_ip``, ``query``)
+    are written in the same locked mutation as the session itself, so a
+    caller never has to follow up with a second write to make the session
+    complete — an incomplete session can therefore never escape.
+    """
     def _create(sessions):
         sid = str(uuid.uuid4())[:8]
         now = datetime.now(timezone.utc).isoformat()
@@ -176,10 +188,14 @@ def create_session(incident_id: str, evidence_snapshot=None) -> dict:
             "id": sid, "incident_id": incident_id, "status": "active",
             "created_at": now, "updated_at": now,
             "evidence_snapshot": evidence_snapshot or {},
-            "risk_score": None, "approval_state": None,
+            "risk_score": risk_score, "approval_state": None,
             "trueforge_session_id": None,
             "actions": [], "findings": [],
         }
+        # Extra metadata may only add fields, never redefine core state.
+        for key, value in metadata.items():
+            if key not in s:
+                s[key] = value
         sessions.append(s)
         return s
     return _mutate_sessions(_create)
@@ -221,9 +237,31 @@ def list_sessions() -> list:
     ]
 
 
-def find_session_by_incident(iid: str):
-    ms = [s for s in _read_sessions() if s["incident_id"] == iid]
-    return sorted(ms, key=lambda s: s["created_at"], reverse=True)[0] if ms else None
+def find_session_by_incident(iid: str, target_ip: str | None = None):
+    """Return the newest session for an incident id, or None.
+
+    An empty/None id never matches: session reuse must be driven by a real
+    incident identifier, otherwise unrelated investigations would collapse
+    onto whichever session happens to lack one.
+
+    When ``target_ip`` is supplied, only sessions recorded against that exact
+    target match. Reuse must never join investigations of different targets —
+    they carry independent evidence, risk and approval state.
+    """
+    if not iid or not isinstance(iid, str):
+        return None
+    matches = []
+    for s in _read_sessions():
+        if not isinstance(s, dict) or s.get("incident_id") != iid:
+            continue
+        if target_ip is not None and (s.get("target_ip") or "") != target_ip:
+            continue
+        matches.append(s)
+    if not matches:
+        return None
+    return sorted(
+        matches, key=lambda s: s.get("created_at") or "", reverse=True
+    )[0]
 
 
 # ---------------------------------------------------------------------------
@@ -657,10 +695,41 @@ def reject_action(
         return {"success": False, "error": "Session not found"}
     return _mutate_sessions(_reject)
 
+#: Fields that define a session's identity and approval lifecycle. These are
+#: managed by the dedicated helpers above and must never be silently
+#: overwritten by a bulk metadata update.
+_PROTECTED_SESSION_KEYS = frozenset({
+    "id", "incident_id", "created_at",
+    "actions", "approval_state", "trueforge_session_id",
+})
+
+
 def update_session(sid: str, **kw) -> dict:
+    """Merge investigation state into an existing session.
+
+    Returns ``{"success": False, ...}`` when the session is missing or when
+    the caller attempts to overwrite identity/approval fields. Callers must
+    treat a failed update as a hard error: a session that did not persist
+    cannot be used to authorize containment.
+    """
+    if not sid or not isinstance(sid, str):
+        return {"success": False, "error": "Session id is required"}
+    if not kw:
+        return {"success": False, "error": "No fields to update"}
+
+    protected = sorted(k for k in kw if k in _PROTECTED_SESSION_KEYS)
+    if protected:
+        return {
+            "success": False,
+            "error": (
+                "Cannot update protected session fields: "
+                + ", ".join(protected)
+            ),
+        }
+
     def _update(sessions):
         for s in sessions:
-            if s["id"] == sid:
+            if isinstance(s, dict) and s.get("id") == sid:
                 s.update(kw)
                 s["updated_at"] = datetime.now(timezone.utc).isoformat()
                 return {"success": True, "session": s}

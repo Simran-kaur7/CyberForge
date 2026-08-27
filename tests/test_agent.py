@@ -293,7 +293,36 @@ class TestValidateToolResult:
         assert _validate_tool_result({"success": True, "process_count": 0}, "check_system_activity") is True
 
     def test_analysis_tool_minimal_valid(self):
-        assert _validate_tool_result({"success": True, "findings": []}, "analyze_evidence") is True
+        """Populated risk_indicators is the minimum usable analysis."""
+        assert _validate_tool_result(
+            {"success": True, "risk_indicators": {"failed_attempts": 1}},
+            "analyze_evidence",
+        ) is True
+
+    def test_analysis_findings_only_rejected(self):
+        """findings alone is NOT scoreable evidence — risk scoring needs
+        risk_indicators, so this must not count as a successful analysis."""
+        assert _validate_tool_result(
+            {"success": True, "findings": []}, "analyze_evidence"
+        ) is False
+        assert _validate_tool_result(
+            {"success": True, "findings": ["something happened"]},
+            "analyze_evidence",
+        ) is False
+
+    def test_analysis_non_dict_indicators_rejected(self):
+        for bad in (None, [], "", 0, "high"):
+            assert _validate_tool_result(
+                {"success": True, "findings": [], "risk_indicators": bad},
+                "analyze_evidence",
+            ) is False
+
+    def test_analysis_empty_indicators_rejected(self):
+        """An empty indicator mapping must not be scored as 0/LOW."""
+        assert _validate_tool_result(
+            {"success": True, "findings": [], "risk_indicators": {}},
+            "analyze_evidence",
+        ) is False
 
     def test_unknown_tool_defaults_to_success(self):
         assert _validate_tool_result({"success": True}, "unknown_tool") is True
@@ -442,14 +471,51 @@ class TestTargetMismatch:
     @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
     @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
     def test_no_analysis_for_unknown_target(self, mock_c, mock_l):
-        """No target IP — analysis is accepted because there's nothing to mismatch."""
-        # Provide analysis without source_ip to avoid mismatch
+        """No target IP — analysis is never called, so risk stays UNKNOWN."""
         analysis = dict(FAKE_ANALYSIS_SUCCESS)
         analysis["source_ip"] = ""
-        with patch("agent.analyze_evidence", return_value=analysis):
+        with patch("agent.analyze_evidence", return_value=analysis) as mock_a:
             result = run_investigation("Check general system activity")
-        # When target is unknown, no mismatch is flagged
+        mock_a.assert_not_called()
         assert result["success"] is True
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["containment_allowed"] is False
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    def test_missing_source_ip_discarded(self, mock_c, mock_l):
+        """A successful analysis with no source_ip is not evidence about the
+        requested target and must never be relabelled with it."""
+        for bad_source in (None, "", "   ", "not-an-ip", "10.0.0", 12345):
+            analysis = dict(FAKE_ANALYSIS_SUCCESS)
+            analysis["source_ip"] = bad_source
+            with patch("agent.analyze_evidence", return_value=analysis):
+                result = run_investigation("Investigate 192.168.1.50")
+            assert result["target_ip"] == "192.168.1.50"
+            # Discarded → not counted as a successful tool
+            assert "analyze_evidence" not in result["tools_used"]
+            assert result["tool_results"]["correlated_analysis"]["available"] is False
+            # Risk must be UNKNOWN, never a fabricated score
+            assert result["risk_score"]["score"] is None, bad_source
+            assert result["risk_score"]["level"] == "UNKNOWN"
+            assert result["evidence_complete"] is False
+            assert result["containment_allowed"] is False
+            assert result["errors"]["analysis"] is not None
+            # The requested IP must not have been stamped onto foreign evidence
+            assert result["findings"] == []
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    def test_missing_source_ip_not_accepted_for_demo_target(self, mock_c, mock_l):
+        """The same bypass must not work for the demo IP either."""
+        analysis = dict(FAKE_ANALYSIS_SUCCESS)
+        analysis.pop("source_ip")
+        with patch("agent.analyze_evidence", return_value=analysis):
+            result = run_investigation("Investigate 10.0.0.25")
+        assert "analyze_evidence" not in result["tools_used"]
+        assert result["risk_score"]["score"] is None
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["containment_allowed"] is False
 
     @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
     @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
@@ -461,6 +527,7 @@ class TestTargetMismatch:
         assert result["success"] is True
         assert "analyze_evidence" in result["tools_used"]
         assert result["errors"]["analysis"] is None
+        assert result["risk_score"]["score"] is not None
 
 
 # ===========================================================================
@@ -658,6 +725,7 @@ class TestMalformedResults:
     })
     @patch("agent.analyze_evidence", return_value={
         "success": True,
+        "source_ip": "10.0.0.25",
         "findings": [],
         "risk_indicators": None,
     })
@@ -665,12 +733,40 @@ class TestMalformedResults:
         """A successful tool response must not bypass value-type validation."""
         result = run_investigation("Investigate 10.0.0.25")
         assert result["success"] is True
-        # Analysis has no risk_indicators (None) → risk_indicators stays empty
-        assert result["risk_score"]["score"] == 0
-        assert result["risk_score"]["level"] == "LOW"
+        # risk_indicators is None → no scoreable target evidence. This must be
+        # UNKNOWN, never 0/LOW computed from an empty dictionary.
+        assert result["risk_score"]["score"] is None
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["risk_score"]["error"] is not None
+        # ...and it must not pass as complete evidence or permit containment
+        assert result["evidence_complete"] is False
+        assert result["status"] == "partial"
+        assert result["containment_allowed"] is False
+        assert "analyze_evidence" not in result["tools_used"]
+        assert "risk_score" not in result["tools_used"]
+        assert result["errors"]["analysis"] is not None
         assert result["evidence"] == [
             "Unusual network connections: 1 connection(s) to non-standard ports"
         ]
+
+    @patch("agent.search_security_logs", return_value=FAKE_LOG_SUCCESS)
+    @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
+    @patch("agent.analyze_evidence", return_value={
+        "success": True,
+        "source_ip": "10.0.0.25",
+        "findings": ["High volume of failed SSH authentication attempts."],
+        "risk_indicators": {},
+    })
+    def test_empty_indicators_do_not_score_low(self, mock_a, mock_c, mock_l):
+        """An empty indicator mapping must yield UNKNOWN, not a 0/LOW score
+        that would mark evidence complete and permit containment."""
+        result = run_investigation("Investigate 10.0.0.25")
+        assert result["risk_score"]["score"] is None
+        assert result["risk_score"]["level"] == "UNKNOWN"
+        assert result["severity"] == "UNKNOWN"
+        assert result["evidence_complete"] is False
+        assert result["containment_allowed"] is False
+        assert "analyze_evidence" not in result["tools_used"]
 
     @patch("agent.search_security_logs", return_value=None)
     @patch("agent.check_system_activity", return_value={"success": True})
@@ -687,7 +783,12 @@ class TestMalformedResults:
 
     @patch("agent.search_security_logs", return_value={"success": True})
     @patch("agent.check_system_activity", return_value={"success": True})
-    @patch("agent.analyze_evidence", return_value={"success": True, "findings": [123, None]})
+    @patch("agent.analyze_evidence", return_value={
+        "success": True,
+        "source_ip": "10.0.0.25",
+        "risk_indicators": {"failed_attempts": 45},
+        "findings": [123, None],
+    })
     def test_non_string_findings(self, mock_a, mock_c, mock_l):
         result = run_investigation("Investigate 10.0.0.25")
         # Main findings should be sanitized
@@ -714,6 +815,8 @@ class TestMalformedResults:
     @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
     @patch("agent.analyze_evidence", return_value={
         "success": True,
+        "source_ip": "10.0.0.25",
+        "risk_indicators": {"failed_attempts": 45},
         "findings": ["valid finding", 123, None, {"secret": "data"}],
     })
     def test_findings_sanitized_in_result(self, mock_a, mock_c, mock_l):
@@ -726,11 +829,13 @@ class TestMalformedResults:
     @patch("agent.check_system_activity", return_value=FAKE_ACTIVITY_SUCCESS)
     @patch("agent.analyze_evidence", return_value={
         "success": True,
+        "source_ip": "10.0.0.25",
+        "risk_indicators": {"failed_attempts": 45},
         "findings": [f"finding {i}" for i in range(20)],
     })
     def test_findings_capped_at_max(self, mock_a, mock_c, mock_l):
         result = run_investigation("Investigate 10.0.0.25")
-        assert len(result["findings"]) <= 10
+        assert len(result["findings"]) == 10
 
 
 # ===========================================================================

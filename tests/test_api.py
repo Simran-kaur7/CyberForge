@@ -333,47 +333,231 @@ def run_all():
                 assert e.detail == "Investigation session could not be persisted."
     check("test_session_persistence_failure_is_controlled", t31)
 
-    # 32: /api/investigate creates a session_id
-    def t32():
-        from app.api.investigate import investigate, InvestigationRequest
-        from app import sdk_client
+    # ---------------------------------------------------------------
+    # /api/investigate session lifecycle
+    # ---------------------------------------------------------------
+    def make_fake_result(target_ip="10.0.0.25", query="Investigate suspicious activity"):
+        """A complete, containment-capable investigation result."""
+        return {
+            "success": True,
+            "status": "complete",
+            "evidence_complete": True,
+            "query": query,
+            "target_ip": target_ip,
+            "severity": "HIGH",
+            "risk_score": {"score": 80, "level": "HIGH", "max_score": 100, "breakdown": {}},
+            "findings": ["test"],
+            "evidence": ["evidence"],
+            "tools_used": ["test"],
+            "recommendation": "test",
+            "containment_allowed": True,
+            "tool_results": {"correlated_analysis": {"available": True}},
+            "errors": {"log_search": None, "system_activity": None, "analysis": None},
+        }
+
+    def with_temp_sessions(fn):
+        """Run fn(sdk_client) against an isolated sessions store."""
         import tempfile
         from pathlib import Path
+        from app import sdk_client
 
         original_sessions = sdk_client.SESSIONS_FILE
         with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir) / "sessions.json"
-            sdk_client.SESSIONS_FILE = tmp
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
             try:
-                from unittest.mock import patch
-                fake_result = {
-                    "success": True,
-                    "status": "complete",
-                    "evidence_complete": True,
-                    "query": "Investigate 10.0.0.25",
-                    "target_ip": "10.0.0.25",
-                    "severity": "HIGH",
-                    "risk_score": {"score": 80, "level": "HIGH", "max_score": 100, "breakdown": {}},
-                    "findings": ["test"],
-                    "evidence": ["evidence"],
-                    "tools_used": ["test"],
-                    "recommendation": "test",
-                    "containment_allowed": True,
-                    "tool_results": {},
-                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
-                }
-                with patch("app.api.investigate.run_investigation", return_value=fake_result):
-                    result = investigate(InvestigationRequest(query="Investigate 10.0.0.25"))
-                assert "session_id" in result, f"Missing session_id in: {list(result.keys())}"
-                assert result["session_id"] is not None
-                assert len(result["session_id"]) == 8
-                # Verify session exists in the store
-                sess = sdk_client.get_session(result["session_id"])
-                assert sess is not None
-                assert sess["incident_id"] == "Investigate 10.0.0.25"
+                return fn(sdk_client)
             finally:
                 sdk_client.SESSIONS_FILE = original_sessions
-    check("test_investigate_creates_session", t32)
+
+    # 32: session is keyed on the caller-supplied incident id, not the query
+    def t32():
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                result = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-1024"
+                ))
+            assert "session_id" in result, f"Missing session_id in: {list(result.keys())}"
+            assert result["session_id"] is not None
+            assert len(result["session_id"]) == 8
+            assert result["incident_id"] == "INC-1024"
+            sess = sdk_client.get_session(result["session_id"])
+            assert sess is not None
+            assert sess["incident_id"] == "INC-1024"
+            assert sess["query"] == "Investigate 10.0.0.25"
+            assert sess["target_ip"] == "10.0.0.25"
+            # Evidence and risk are persisted in the creating mutation
+            assert sess["risk_score"]["score"] == 80
+            assert sess["evidence_snapshot"] == {"correlated_analysis": {"available": True}}
+
+        with_temp_sessions(body)
+    check("test_investigate_session_keyed_on_incident_id", t32)
+
+    # 33: identical query text must never merge distinct investigations
+    def t33():
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            def run(target):
+                with patch(
+                    "app.api.investigate.run_investigation",
+                    return_value=make_fake_result(target_ip=target),
+                ):
+                    return investigate(InvestigationRequest(
+                        query="Investigate suspicious activity", target_ip=target
+                    ))["session_id"]
+
+            first = run("10.0.0.25")
+            other_target = run("192.168.1.50")
+            same_target_again = run("10.0.0.25")
+
+            # Same query, different targets → independent sessions
+            assert first != other_target, "Distinct targets must not share a session"
+            # Without an incident id there is no stable key, so never reuse
+            assert same_target_again != first
+            incident_ids = {
+                sdk_client.get_session(i)["incident_id"]
+                for i in (first, other_target, same_target_again)
+            }
+            assert len(incident_ids) == 3, f"Sessions collided: {incident_ids}"
+            # The free-form query must not become the session key
+            for iid in incident_ids:
+                assert "Investigate suspicious activity" not in iid
+
+        with_temp_sessions(body)
+    check("test_same_query_does_not_merge_sessions", t33)
+
+    # 34: explicit incident id reuses a session, but only for the same target
+    def t34():
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            def run(target):
+                with patch(
+                    "app.api.investigate.run_investigation",
+                    return_value=make_fake_result(target_ip=target),
+                ):
+                    return investigate(InvestigationRequest(
+                        query="Investigate suspicious activity",
+                        target_ip=target,
+                        incident_id="INC-2048",
+                    ))["session_id"]
+
+            first = run("10.0.0.25")
+            again = run("10.0.0.25")
+            other_target = run("192.168.1.50")
+
+            # Same incident + target → the approval lifecycle continues
+            assert first == again
+            # Same incident, different target → must not overwrite the first
+            assert other_target != first
+            assert sdk_client.get_session(first)["target_ip"] == "10.0.0.25"
+            assert sdk_client.get_session(other_target)["target_ip"] == "192.168.1.50"
+
+        with_temp_sessions(body)
+    check("test_incident_id_reuse_is_target_scoped", t34)
+
+    # 35: a failed session update must not return a containment-capable session
+    def t35():
+        from app.api.investigate import investigate, InvestigationRequest
+        from app.api.approvals import HTTPException
+
+        def body(sdk_client):
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                first = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-4096"
+                ))
+            assert first["session_id"]
+
+            failed = make_fake_result()
+            with patch("app.api.investigate.run_investigation", return_value=failed), \
+                 patch("app.api.investigate.update_session",
+                       return_value={"success": False, "error": "write failed"}):
+                try:
+                    investigate(InvestigationRequest(
+                        query="Investigate 10.0.0.25", incident_id="INC-4096"
+                    ))
+                    assert False, "Persistence failure should not report success"
+                except HTTPException as e:
+                    assert e.status_code == 503
+                    assert e.detail == "Investigation session could not be persisted."
+            # No usable session id may leak to the caller
+            assert "session_id" not in failed
+
+        with_temp_sessions(body)
+    check("test_investigate_persistence_failure_is_controlled", t35)
+
+    # 36: an unwritable session store is a controlled 503, not a 500/success
+    def t36():
+        from app.api.investigate import investigate, InvestigationRequest
+        from app.api.approvals import HTTPException
+
+        def body(sdk_client):
+            fake = make_fake_result()
+            with patch("app.api.investigate.run_investigation", return_value=fake), \
+                 patch("app.api.investigate.create_session", side_effect=OSError("disk full")):
+                try:
+                    investigate(InvestigationRequest(query="Investigate 10.0.0.25"))
+                    assert False, "Unwritable session store should not report success"
+                except HTTPException as e:
+                    assert e.status_code == 503
+            assert "session_id" not in fake
+
+        with_temp_sessions(body)
+    check("test_investigate_session_write_error_is_controlled", t36)
+
+    # 37: malformed incident ids are rejected before any session work
+    def t37():
+        from app.api.investigate import (
+            investigate,
+            InvestigationRequest,
+            _normalize_incident_id,
+            MAX_INCIDENT_ID_LENGTH,
+        )
+        from app.api.approvals import HTTPException
+
+        assert _normalize_incident_id(None) is None
+        assert _normalize_incident_id("   ") is None
+        assert _normalize_incident_id("  INC-1024 ") == "INC-1024"
+        for bad in ("INC 1024", "INC/1024", "INC\n1024", "a" * (MAX_INCIDENT_ID_LENGTH + 1), 42):
+            try:
+                _normalize_incident_id(bad)
+                assert False, f"Expected rejection for {bad!r}"
+            except HTTPException as e:
+                assert e.status_code == 422
+
+        def body(sdk_client):
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                try:
+                    investigate(InvestigationRequest(
+                        query="Investigate 10.0.0.25", incident_id="INC 1024"
+                    ))
+                    assert False, "Expected 422 for a malformed incident_id"
+                except HTTPException as e:
+                    assert e.status_code == 422
+
+        with_temp_sessions(body)
+    check("test_investigate_rejects_malformed_incident_id", t37)
+
+    # 38: session store helpers reject unusable keys and protected writes
+    def t38():
+        def body(sdk_client):
+            created = sdk_client.create_session("INC-8192", {"a": 1}, risk_score={"score": 10})
+            assert created["risk_score"] == {"score": 10}
+            # An absent incident id must never match an existing session
+            assert sdk_client.find_session_by_incident(None) is None
+            assert sdk_client.find_session_by_incident("") is None
+            # Identity and approval state cannot be clobbered by a bulk update
+            for field in ("id", "incident_id", "approval_state", "actions"):
+                r = sdk_client.update_session(created["id"], **{field: "hijacked"})
+                assert r["success"] is False, f"{field} should be protected"
+            assert sdk_client.get_session(created["id"])["incident_id"] == "INC-8192"
+            assert sdk_client.update_session(created["id"])["success"] is False
+            assert sdk_client.update_session("", risk_score={})["success"] is False
+
+        with_temp_sessions(body)
+    check("test_session_store_key_and_field_guards", t38)
 
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")

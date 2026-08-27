@@ -118,8 +118,13 @@ def _validate_tool_result(result: dict, tool_name: str) -> bool:
                 or "unusual_connection_count" in result)
 
     if tool_name == "analyze_evidence":
-        # Must have findings or risk_indicators
-        return ("findings" in result or "risk_indicators" in result)
+        # Risk scoring consumes risk_indicators, so `findings` alone is NOT
+        # usable target-specific evidence.  A successful analysis must carry
+        # a populated indicator mapping — a missing, non-dict, or empty
+        # value must be rejected here so that risk falls through to UNKNOWN
+        # instead of being scored as 0/LOW from an empty dictionary.
+        indicators = result.get("risk_indicators")
+        return isinstance(indicators, dict) and bool(indicators)
 
     # Unknown tool: accept if success=True
     return True
@@ -147,6 +152,42 @@ def _safe_count(value) -> int:
 def _safe_list(value) -> list:
     """Return a list only when a tool supplied an actual list."""
     return value if isinstance(value, list) else []
+
+
+def _analysis_discard_reason(result, target_ip: str) -> str | None:
+    """Return why correlated analysis must be discarded, or None to keep it.
+
+    A successful ``analyze_evidence()`` response is contractually scoped to
+    a single source IP.  Evidence of unknown or foreign origin must never be
+    relabelled with the requested target, because it would then drive a
+    target-specific risk score and a containment decision.  We therefore
+    require a non-empty, well-formed ``source_ip`` that is exactly equal to
+    the requested target.
+
+    Unsuccessful results are left alone — ``_validate_tool_result`` rejects
+    them, and their own error reporting is more informative than a
+    targeting message.
+    """
+    if not isinstance(result, dict):
+        return "Analysis returned a malformed result and it was discarded"
+
+    if not result.get("success"):
+        return None
+
+    source_ip = result.get("source_ip")
+    if not isinstance(source_ip, str) or not _validate_ip(source_ip):
+        return (
+            "Analysis results did not identify a valid source IP "
+            "and were discarded"
+        )
+
+    if source_ip.strip() != target_ip:
+        return (
+            "Analysis results are for a different target "
+            f"({source_ip.strip()}) and were discarded"
+        )
+
+    return None
 
 
 def run_investigation(query: str, target_ip: str | None = None) -> dict:
@@ -218,16 +259,15 @@ def run_investigation(query: str, target_ip: str | None = None) -> dict:
         except Exception as exc:
             analysis_error = _sanitize_exception(exc)
 
-        # Defense-in-depth: reject any analysis whose source does not
-        # match the requested target.
-        if analysis_result and isinstance(analysis_result, dict):
-            analysis_source_ip = analysis_result.get("source_ip", "")
-            if analysis_source_ip and analysis_source_ip != target_ip:
+        # Defense-in-depth: only keep analysis that is explicitly scoped to
+        # the requested target.  A successful result with a missing, empty,
+        # or malformed source_ip is NOT evidence about this target and must
+        # not be accepted for it.
+        if analysis_result is not None:
+            discard_reason = _analysis_discard_reason(analysis_result, target_ip)
+            if discard_reason:
                 analysis_mismatch = True
-                analysis_error = (
-                    "Analysis results are for a different target "
-                    f"({analysis_source_ip}) and were discarded"
-                )
+                analysis_error = discard_reason
                 analysis_result = None
     else:
         analysis_error = (
@@ -239,6 +279,14 @@ def run_investigation(query: str, target_ip: str | None = None) -> dict:
     activity_ok = _validate_tool_result(activity_result, "check_system_activity")
     analysis_ok = _validate_tool_result(analysis_result, "analyze_evidence")
     tools_succeeded = sum([log_ok, activity_ok, analysis_ok])
+
+    # Always explain why correlated analysis is unusable, so an UNKNOWN risk
+    # score is never silently unexplained.
+    if target_ip and not analysis_ok and analysis_error is None:
+        analysis_error = (
+            "Correlated analysis did not return usable target-specific "
+            "evidence and was discarded"
+        )
 
     # --- Case A: all tools failed ---
     if tools_succeeded == 0:
@@ -260,35 +308,39 @@ def run_investigation(query: str, target_ip: str | None = None) -> dict:
     # --- Case B: partial evidence ---
     evidence_complete = tools_succeeded == 3
 
-    # Step 4: Build risk indicators from tool results.
-    # When a specific target was requested but analysis failed (e.g.
-    # unsupported IP), do NOT fabricate risk from raw system-wide data —
-    # that would produce misleading LOW risk for the wrong target.
     # Step 4: Build risk indicators.
     # Risk scoring REQUIRES target-specific correlated evidence from
     # analyze_evidence().  Without it, risk is UNKNOWN — we must NOT
     # fabricate target-specific risk from raw system-wide log/activity
-    # data, as that would produce misleading risk assessments for the
-    # wrong target.
+    # data, nor score an empty indicator mapping as 0/LOW, as either
+    # would produce a misleading assessment for the requested target.
     risk_indicators = {}
-    target_analysis_missing = not analysis_ok
 
     if analysis_ok and isinstance(analysis_result, dict):
         raw_indicators = analysis_result.get("risk_indicators")
-        if isinstance(raw_indicators, dict):
+        if isinstance(raw_indicators, dict) and raw_indicators:
             risk_indicators = dict(raw_indicators)
             # Override source_ip with actual target — analysis may have
-            # a hardcoded value.
+            # a hardcoded value.  Safe here only because the analysis was
+            # already confirmed to be scoped to this exact target.
             if target_ip and risk_indicators.get("source_ip") != target_ip:
                 risk_indicators["source_ip"] = target_ip
 
-    # Step 5: Compute risk score with exception handling
+    # Derive this from the indicators we actually extracted rather than from
+    # tool success alone: a "successful" analysis carrying no usable
+    # indicators must still yield UNKNOWN risk and block containment.
+    target_analysis_missing = not risk_indicators
+
+    # Step 5: Compute risk score with exception handling.
+    # Only score when we actually hold target-specific indicators — scoring
+    # an empty mapping would yield a fabricated 0/LOW assessment.
     risk_score = None
     risk_score_error = None
-    try:
-        risk_score = compute_risk_score(risk_indicators, KNOWN_BAD_IPS)
-    except Exception as exc:
-        risk_score_error = _sanitize_exception(exc)
+    if not target_analysis_missing:
+        try:
+            risk_score = compute_risk_score(risk_indicators, KNOWN_BAD_IPS)
+        except Exception as exc:
+            risk_score_error = _sanitize_exception(exc)
 
     # When target-specific analysis is unavailable, the risk score
     # must be UNKNOWN — a score of 0/LOW from empty indicators would
