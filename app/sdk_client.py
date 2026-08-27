@@ -703,14 +703,72 @@ _PROTECTED_SESSION_KEYS = frozenset({
     "actions", "approval_state", "trueforge_session_id",
 })
 
+_REINVESTIGATION_SUPERSEDE_REASON = (
+    "Superseded: the investigation was re-run, so this approval was requested "
+    "against evidence/risk that has since been replaced."
+)
 
-def update_session(sid: str, **kw) -> dict:
+
+def _supersede_pending_approval(session: dict) -> str | None:
+    """Retire a still-pending approval on ``session`` in place.
+
+    Must be called while holding the sessions lock (i.e. from inside a
+    ``_mutate_sessions`` callback) so the transition is atomic with whatever
+    else the mutation changes.
+
+    A pending approval is bound to a TrueForge ``tool_call_id`` from the
+    investigation run that requested it. Once that run's evidence, risk, target
+    or query is replaced by a re-investigation, deciding the approval would
+    authorize a tool call against state the analyst never reviewed — so it must
+    stop being decidable. Marking it terminal here means ``prepare_decision``
+    and the legacy approve/reject helpers all reject it, while a fresh approval
+    can still be requested against the new evidence.
+
+    Returns the retired action id, or ``None`` when there was nothing pending.
+    """
+    current = session.get("approval_state")
+    if not isinstance(current, dict) or current.get("status") != "pending":
+        return None
+
+    action_id = current.get("action_id")
+    now = datetime.now(timezone.utc).isoformat()
+
+    def _retire(record: dict) -> None:
+        record["status"] = "superseded"
+        record["decided_at"] = now
+        record["decided_by"] = "system:reinvestigation"
+        record["superseded_reason"] = _REINVESTIGATION_SUPERSEDE_REASON
+        # Drop any transient claim so nothing downstream treats the retired
+        # approval as live, in-flight, or mid-decision.
+        record.pop("decision_in_progress", None)
+        record["request_in_flight"] = False
+
+    _retire(current)
+    for action in session.get("actions", []):
+        if isinstance(action, dict) and action.get("action_id") == action_id:
+            _retire(action)
+            break
+
+    return action_id
+
+
+def update_session(sid: str, *, supersede_stale_approval: bool = False, **kw) -> dict:
     """Merge investigation state into an existing session.
 
     Returns ``{"success": False, ...}`` when the session is missing or when
     the caller attempts to overwrite identity/approval fields. Callers must
     treat a failed update as a hard error: a session that did not persist
     cannot be used to authorize containment.
+
+    When ``supersede_stale_approval`` is set, any approval that is still pending
+    is retired in the *same* locked mutation as the field merge. Reusing an
+    incident's session for a new investigation run replaces the evidence and
+    risk an analyst reasons about; a pending approval left behind was requested
+    against the superseded state and is bound to that run's TrueForge tool call,
+    so it must not remain decidable. Doing both in one mutation closes the
+    window in which a concurrent decision could authorize the stale call after
+    the evidence has already changed. The retired action id, when any, is
+    returned as ``superseded_action_id``.
     """
     if not sid or not isinstance(sid, str):
         return {"success": False, "error": "Session id is required"}
@@ -731,8 +789,16 @@ def update_session(sid: str, **kw) -> dict:
         for s in sessions:
             if isinstance(s, dict) and s.get("id") == sid:
                 s.update(kw)
+                superseded_action_id = (
+                    _supersede_pending_approval(s)
+                    if supersede_stale_approval
+                    else None
+                )
                 s["updated_at"] = datetime.now(timezone.utc).isoformat()
-                return {"success": True, "session": s}
+                result = {"success": True, "session": s}
+                if superseded_action_id:
+                    result["superseded_action_id"] = superseded_action_id
+                return result
         return {"success": False, "error": "Session not found"}
     return _mutate_sessions(_update)
 

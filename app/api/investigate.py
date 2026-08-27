@@ -188,6 +188,12 @@ def investigate(body: InvestigationRequest):
                 risk_score=risk_score,
                 target_ip=resolved_target,
                 query=query,
+                # Reusing this session means its evidence/risk are being
+                # replaced. Any approval still pending was requested against the
+                # previous investigation and is bound to that run's TrueForge
+                # tool call, so retire it in the same write — it must not be
+                # decidable after the state it authorized has changed.
+                supersede_stale_approval=True,
             )
             if not update_result.get("success"):
                 # Persistence is required: this session is the authoritative
