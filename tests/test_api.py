@@ -1643,6 +1643,218 @@ def run_all():
     check("test_crashed_forwarding_claim_expires", t94)
 
     # ------------------------------------------------------------------
+    # Bug #15 regression — a dispatch that actually reached TrueForge must
+    # never be silently replayed after a crash/restart, and a dispatch
+    # that never got that far must remain automatically recoverable.
+    # ------------------------------------------------------------------
+
+    def _age_forwarding_claim(sdk_client, sid, aid):
+        from datetime import datetime, timezone, timedelta
+        from app.sdk_client import FORWARDING_CLAIM_TIMEOUT_SECONDS
+        old_time = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=FORWARDING_CLAIM_TIMEOUT_SECONDS + 60)
+        ).isoformat()
+
+        def _age(sessions):
+            for s2 in sessions:
+                if s2["id"] == sid:
+                    for a in s2.get("actions", []):
+                        if a.get("action_id") == aid:
+                            a["forwarding_started_at"] = old_time
+
+        sdk_client._mutate_sessions(_age)
+
+    # 102: acquire claim -> TrueForge POST succeeds (simulated by marking
+    # dispatch) -> process crashes before complete_forwarding/persistence
+    # -> process restarts -> lease has since expired. Recovery must NOT
+    # silently reclaim the lease and hand back a fresh claim, since that
+    # would let a caller re-POST a decision that may already have been
+    # delivered.
+    def t102():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-CRASH-DUP-1")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.99"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-crash-dup-1")
+            token = br["forwarding_owner"]
+            assert br.get("pending_decision") == "approved"
+
+            # This is what the real POST path does immediately before
+            # hitting the network — simulates "the POST is about to go/did
+            # go out" without needing a real TrueForge call.
+            dm = sdk_client.mark_forwarding_dispatched(sid, aid, token)
+            assert dm["success"] is True
+
+            # Crash: nothing else is persisted (no complete_forwarding, no
+            # release). The lease simply ages out on restart.
+            _age_forwarding_claim(sdk_client, sid, aid)
+
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-crash-dup-1")
+            assert rr["success"] is False, f"Must not silently reclaim: {rr}"
+            assert rr.get("uncertain_delivery") is True
+
+            # No duplicate dispatch happened: the action is exactly as the
+            # crashed attempt left it.
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarded_to_trueforge") is not True
+            assert act.get("forwarding_owner") == token
+            assert act.get("forwarding_dispatched_at") is not None
+        with_temp_sessions(body)
+    check("test_crash_after_dispatch_not_blindly_resubmitted", t102)
+
+    # 103: same uncertain state, but via the set_approval_tool_call_id
+    # late-forward entry point (the other place a lease gets reclaimed).
+    def t103():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-CRASH-DUP-2")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.99"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-crash-dup-2")
+            token = br["forwarding_owner"]
+            dm = sdk_client.mark_forwarding_dispatched(sid, aid, token)
+            assert dm["success"] is True
+            _age_forwarding_claim(sdk_client, sid, aid)
+
+            br2 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-crash-dup-2")
+            assert br2["success"] is False, f"Must not silently reclaim: {br2}"
+            assert br2.get("uncertain_delivery") is True
+        with_temp_sessions(body)
+    check("test_late_bind_after_crash_not_blindly_resubmitted", t103)
+
+    # 104: crash BEFORE dispatch (claim acquired, process dies before the
+    # network call is ever made) must remain automatically recoverable —
+    # the dispatch marker is never set in this case.
+    def t104():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-CRASH-NODUP")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.99"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-crash-nodup")
+            token = br["forwarding_owner"]
+            # No mark_forwarding_dispatched call — crash happened before
+            # the network call was even attempted.
+            _age_forwarding_claim(sdk_client, sid, aid)
+
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-crash-nodup")
+            assert rr["success"] is True, f"Undispatched claim must be reclaimable: {rr}"
+            assert rr.get("uncertain_delivery") is not True
+            assert rr["forwarding_owner"] != token
+        with_temp_sessions(body)
+    check("test_crash_before_dispatch_remains_recoverable", t104)
+
+    # 105: an operator resolves an uncertain claim by confirming the
+    # decision really was delivered — this must finalize the decision as
+    # forwarded WITHOUT triggering any further POST, and must be stable
+    # under a subsequent retry attempt (no re-dispatch, no error either).
+    def t105():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RESOLVE-DELIVERED")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.99"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-resolve-1")
+            token = br["forwarding_owner"]
+            sdk_client.mark_forwarding_dispatched(sid, aid, token)
+            _age_forwarding_claim(sdk_client, sid, aid)
+
+            res = sdk_client.resolve_uncertain_forwarding(
+                sid, aid, confirmed_delivered=True,
+            )
+            assert res["success"] is True
+            assert res["forwarded"] is True
+
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarded_to_trueforge") is True
+            assert act.get("forwarding_to_trueforge") is False
+            assert act.get("forwarding_dispatched_at") is None
+
+            # Idempotent: retrying now correctly reports already forwarded
+            # instead of re-dispatching.
+            rr2 = sdk_client.retry_approval_forwarding(sid, aid, "tc-resolve-1")
+            assert rr2["success"] is False
+            assert "already forwarded" in rr2.get("error", "").lower()
+        with_temp_sessions(body)
+    check("test_resolve_uncertain_confirmed_delivered_is_terminal", t105)
+
+    # 106: an operator resolves an uncertain claim by confirming the
+    # decision was NOT delivered — this must clear the claim so the
+    # normal retry path can safely re-dispatch exactly once more.
+    def t106():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-RESOLVE-NOTDELIVERED")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.99"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-resolve-2")
+            token = br["forwarding_owner"]
+            sdk_client.mark_forwarding_dispatched(sid, aid, token)
+            _age_forwarding_claim(sdk_client, sid, aid)
+
+            res = sdk_client.resolve_uncertain_forwarding(
+                sid, aid, confirmed_delivered=False,
+            )
+            assert res["success"] is True
+            assert res["forwarded"] is False
+
+            rr = sdk_client.retry_approval_forwarding(sid, aid, "tc-resolve-2")
+            assert rr["success"] is True
+            assert rr.get("uncertain_delivery") is not True
+            assert rr.get("pending_decision") == "approved"
+            new_token = rr["forwarding_owner"]
+            sdk_client.complete_forwarding(sid, aid, owner_token=new_token)
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarded_to_trueforge") is True
+        with_temp_sessions(body)
+    check("test_resolve_uncertain_not_delivered_allows_retry", t106)
+
+    # 107: mark_forwarding_dispatched refuses to mark under a claim the
+    # caller no longer owns, and refuses when there's no active claim at
+    # all — a caller that already lost its lease must not be able to
+    # dispatch under it.
+    def t107():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-DISPATCH-GUARD")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.99"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-dispatch-guard")
+            token = br["forwarding_owner"]
+
+            bad = sdk_client.mark_forwarding_dispatched(sid, aid, "not-the-real-token")
+            assert bad["success"] is False
+
+            ok = sdk_client.mark_forwarding_dispatched(sid, aid, token)
+            assert ok["success"] is True
+
+            sdk_client.complete_forwarding(sid, aid, owner_token=token)
+            no_claim = sdk_client.mark_forwarding_dispatched(sid, aid, token)
+            assert no_claim["success"] is False
+        with_temp_sessions(body)
+    check("test_mark_dispatched_requires_owned_active_claim", t107)
+
+    # ------------------------------------------------------------------
     # 95-101: Regression — request_in_flight must not block a local
     # terminal decision (approve_action/reject_action). Only a competing
     # decision_in_progress forward may block them; the late tool-call

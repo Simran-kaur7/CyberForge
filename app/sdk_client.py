@@ -845,6 +845,39 @@ def _is_forwarding_claim_active(action: dict) -> bool:
         return False
 
 
+def _forwarding_needs_manual_resolution(action: dict) -> bool:
+    """True when a forwarding claim's lease has expired *and* a dispatch to
+    TrueForge was actually attempted under that claim, so the outcome of
+    that attempt is unknown.
+
+    ``forwarding_dispatched_at`` is written durably (see
+    ``mark_forwarding_dispatched``) immediately before the outbound POST to
+    TrueForge — i.e. before the exact window in which a process crash can
+    no longer be told apart from "never tried." If that marker is present
+    once the lease expires, forwarding_to_trueforge/forwarded_to_trueforge
+    alone can't tell us whether the POST landed: TrueForge has no
+    idempotency-key contract, so silently reclaiming the lease and
+    re-POSTing risks delivering the same decision twice.
+
+    Automatic reclaim (in ``retry_approval_forwarding`` and
+    ``set_approval_tool_call_id``) must stop here and surface the
+    uncertainty instead of retrying. An operator resolves it explicitly via
+    ``resolve_uncertain_forwarding`` after checking TrueForge out-of-band.
+
+    A lease that expired *before* any dispatch was attempted (crash while
+    merely holding the claim, e.g. before the network call was even made)
+    is unaffected — that case never sets the marker and remains safe to
+    reclaim automatically, same as before.
+    """
+    if not action.get("forwarding_to_trueforge"):
+        return False
+    if action.get("forwarded_to_trueforge"):
+        return False
+    if not action.get("forwarding_dispatched_at"):
+        return False
+    return not _is_forwarding_claim_active(action)
+
+
 def _has_competing_decision_operation(session: dict) -> str | None:
     """Return a human-readable reason if a *decision* forward is actively
     racing this session's pending approval, or ``None`` if a local
@@ -1123,12 +1156,32 @@ def set_approval_tool_call_id(
                                 "already_forwarding": True,
                                 "forwarding_owner": action.get("forwarding_owner"),
                             }
+                        if _forwarding_needs_manual_resolution(action):
+                            # A dispatch was attempted under the expired
+                            # claim and its outcome is unknown — do not
+                            # reclaim and re-POST. See
+                            # resolve_uncertain_forwarding().
+                            return {
+                                "success": False,
+                                "error": (
+                                    "A previous TrueForge delivery attempt "
+                                    "for this decision did not complete "
+                                    "before the process restarted, and its "
+                                    "outcome is unknown. Manual "
+                                    "verification is required before "
+                                    "retrying — see "
+                                    "resolve_uncertain_forwarding()."
+                                ),
+                                "uncertain_delivery": True,
+                                "action_id": action_id,
+                            }
                         # Expired or no claim — acquire fresh.
                         token = str(uuid.uuid4())
                         now_claim = datetime.now(timezone.utc).isoformat()
                         action["forwarding_to_trueforge"] = True
                         action["forwarding_owner"] = token
                         action["forwarding_started_at"] = now_claim
+                        action.pop("forwarding_dispatched_at", None)
                         return {
                             "success": True,
                             "action_id": action_id,
@@ -1166,6 +1219,7 @@ def _release_forwarding_claim_unlocked(
                     action["forwarded_to_trueforge"] = False
                     action.pop("forwarding_owner", None)
                     action.pop("forwarding_started_at", None)
+                    action.pop("forwarding_dispatched_at", None)
                     action["forward_error"] = error
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
                     return {"success": True, "action_id": action_id, "retryable": True}
@@ -1201,6 +1255,7 @@ def release_forwarding_claim(sid: str, action_id: str, error: str, owner_token: 
                     action["forwarded_to_trueforge"] = False
                     action.pop("forwarding_owner", None)
                     action.pop("forwarding_started_at", None)
+                    action.pop("forwarding_dispatched_at", None)
                     action["forward_error"] = error
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
                     return {"success": True, "action_id": action_id, "retryable": True}
@@ -1235,12 +1290,120 @@ def complete_forwarding(sid: str, action_id: str, owner_token: str | None = None
                     action["forwarded_to_trueforge"] = True
                     action.pop("forwarding_owner", None)
                     action.pop("forwarding_started_at", None)
+                    action.pop("forwarding_dispatched_at", None)
                     action.pop("forward_error", None)
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
                     return {"success": True, "action_id": action_id}
             return {"success": False, "error": "Action not found"}
         return {"success": False, "error": "Session not found"}
     return _mutate_sessions(_complete)
+
+
+def mark_forwarding_dispatched(sid: str, action_id: str, owner_token: str | None = None) -> dict:
+    """Durably record that a TrueForge dispatch is about to be attempted.
+
+    This is the durable "outbox" write for Bug #15: the caller must invoke
+    this — and see ``success`` — immediately before issuing the outbound
+    POST to TrueForge, under the forwarding claim it already holds.
+
+    Persisting the marker *before* the network call, rather than after, is
+    what closes the crash window: if the process dies after TrueForge
+    accepts the POST but before ``complete_forwarding`` runs, this marker
+    is already on disk. On restart, lease-recovery sees
+    ``forwarding_dispatched_at`` set on an expired claim and refuses to
+    silently reclaim it (see ``_forwarding_needs_manual_resolution``),
+    instead of blindly re-POSTing a decision that may have already been
+    delivered. A crash *before* this call (e.g. immediately after the
+    claim was acquired, before dispatch even began) leaves no marker
+    behind, so that case remains automatically recoverable exactly as
+    before.
+
+    If ``owner_token`` is provided, only the current claim owner may set
+    the marker — a caller that already lost the lease to a reclaim must
+    not be allowed to dispatch under a claim it no longer holds.
+    """
+    def _mark(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+            for action in s.get("actions", []):
+                if action.get("action_id") == action_id:
+                    if not action.get("forwarding_to_trueforge"):
+                        return {
+                            "success": False,
+                            "error": "No active forwarding claim to mark as dispatched",
+                        }
+                    if owner_token and action.get("forwarding_owner") != owner_token:
+                        return {
+                            "success": False,
+                            "error": "Forwarding claim belongs to another caller",
+                        }
+                    now = datetime.now(timezone.utc).isoformat()
+                    action["forwarding_dispatched_at"] = now
+                    s["updated_at"] = now
+                    return {"success": True, "action_id": action_id}
+            return {"success": False, "error": "Action not found"}
+        return {"success": False, "error": "Session not found"}
+    return _mutate_sessions(_mark)
+
+
+def resolve_uncertain_forwarding(
+    sid: str,
+    action_id: str,
+    confirmed_delivered: bool,
+    resolved_by: str = "operator",
+) -> dict:
+    """Manually resolve a forwarding claim left uncertain by a crash.
+
+    Only applies to an action currently in the uncertain state produced by
+    ``_forwarding_needs_manual_resolution`` (a dispatch marker is set and
+    the owning claim's lease has expired without ``complete_forwarding``
+    or a release ever running) — this is a deliberate operator action taken
+    after checking TrueForge directly out-of-band, not an automatic retry
+    path, since TrueForge does not offer an idempotency-key contract that
+    would let the system verify this itself.
+
+    ``confirmed_delivered=True`` finalizes the decision as forwarded
+    without re-POSTing, so a delivery that already happened is never
+    replayed. ``confirmed_delivered=False`` clears the stuck claim so the
+    existing ``retry_approval_forwarding`` path can safely re-dispatch —
+    the same retry semantics as any other genuinely failed forward.
+    """
+    def _resolve(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+            for action in s.get("actions", []):
+                if action.get("action_id") == action_id:
+                    if not _forwarding_needs_manual_resolution(action):
+                        return {
+                            "success": False,
+                            "error": "Action is not in an uncertain delivery state",
+                        }
+                    now = datetime.now(timezone.utc).isoformat()
+                    action["forwarding_to_trueforge"] = False
+                    action.pop("forwarding_owner", None)
+                    action.pop("forwarding_started_at", None)
+                    action.pop("forwarding_dispatched_at", None)
+                    action["forward_resolved_by"] = resolved_by
+                    if confirmed_delivered:
+                        action["forwarded_to_trueforge"] = True
+                        action.pop("forward_error", None)
+                    else:
+                        action["forwarded_to_trueforge"] = False
+                        action["forward_error"] = (
+                            "Delivery confirmed not to have reached TrueForge "
+                            "after crash recovery; cleared for retry"
+                        )
+                    s["updated_at"] = now
+                    return {
+                        "success": True,
+                        "action_id": action_id,
+                        "forwarded": confirmed_delivered,
+                    }
+            return {"success": False, "error": "Action not found"}
+        return {"success": False, "error": "Session not found"}
+    return _mutate_sessions(_resolve)
 
 
 def retry_approval_forwarding(
@@ -1306,12 +1469,33 @@ def retry_approval_forwarding(
                     "forwarding_owner": target.get("forwarding_owner"),
                 }
 
-            # Atomically acquire forwarding claim.
+            if _forwarding_needs_manual_resolution(target):
+                # A dispatch was actually attempted under the now-expired
+                # claim. We cannot tell whether it reached TrueForge, so we
+                # must not silently reclaim and re-POST — that could
+                # deliver the same decision twice. Surface the uncertainty
+                # instead; see resolve_uncertain_forwarding().
+                return {
+                    "success": False,
+                    "error": (
+                        "A previous TrueForge delivery attempt for this "
+                        "decision did not complete before the process "
+                        "restarted, and its outcome is unknown. Manual "
+                        "verification is required before retrying — see "
+                        "resolve_uncertain_forwarding()."
+                    ),
+                    "uncertain_delivery": True,
+                    "action_id": action_id,
+                }
+
+            # Expired or no claim, and no dispatch was attempted under it
+            # — safe to atomically acquire a fresh forwarding claim.
             token = str(uuid.uuid4())
             now_claim = datetime.now(timezone.utc).isoformat()
             target["forwarding_to_trueforge"] = True
             target["forwarding_owner"] = token
             target["forwarding_started_at"] = now_claim
+            target.pop("forwarding_dispatched_at", None)
             target.pop("forward_error", None)
             s["updated_at"] = now_claim
 

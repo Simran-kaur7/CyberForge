@@ -303,6 +303,7 @@ def request_containment_approval(
             complete_forwarding,
             retry_approval_forwarding,
             release_request_claim,
+            mark_forwarding_dispatched,
         )
 
         session = get_session(body.session_id)
@@ -542,6 +543,24 @@ def request_containment_approval(
 
             if thread_id:
                 approval_input["thread_id"] = thread_id
+
+            # Durably record that a dispatch is about to be attempted
+            # *before* making the network call. This is what lets a
+            # restart after a crash tell "the POST may have gone out" apart
+            # from "the POST was never attempted" — see
+            # mark_forwarding_dispatched() for why this ordering matters.
+            dispatch_marked = mark_forwarding_dispatched(
+                local_session_id, action_id, owner_token=forwarding_owner_token,
+            )
+            if not dispatch_marked.get("success"):
+                # Another caller already reclaimed this lease — we no
+                # longer own the claim, so we must not dispatch under it.
+                raise HTTPException(
+                    status_code=409,
+                    detail=dispatch_marked.get(
+                        "error", "Forwarding claim was lost before dispatch",
+                    ),
+                )
 
             try:
                 _tf_post_sse(
