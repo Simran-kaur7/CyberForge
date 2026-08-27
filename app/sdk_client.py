@@ -710,7 +710,13 @@ def approve_action(
     expected_tool_call_id: str | None = None,
     expected_trueforge_session_id: str | None = None,
 ) -> dict:
-    """Legacy local-only approval helper; use prepare/complete for upstream forwarding."""
+    """Legacy local-only approval helper; use prepare/complete for upstream forwarding.
+
+    Deciding locally does not wait on the initial ``request_approval`` claim
+    (``request_in_flight``) — only a competing decision forward
+    (``decision_in_progress``) blocks this. See
+    ``_has_competing_decision_operation`` for why.
+    """
     def _approve(sessions):
         for s in sessions:
             if s["id"] != sid:
@@ -720,7 +726,7 @@ def approve_action(
                 return {"success": False, "error": "No matching pending approval"}
             if current.get("status") != "pending":
                 return {"success": False, "error": f"Action already {current.get('status')}"}
-            active_reason = _has_active_approval_operation(s)
+            active_reason = _has_competing_decision_operation(s)
             if active_reason:
                 return {"success": False, "error": active_reason}
             valid, error = _validate_decision_ids(
@@ -759,7 +765,13 @@ def reject_action(
     expected_tool_call_id: str | None = None,
     expected_trueforge_session_id: str | None = None,
 ) -> dict:
-    """Legacy local-only rejection helper; use prepare/complete for upstream forwarding."""
+    """Legacy local-only rejection helper; use prepare/complete for upstream forwarding.
+
+    Deciding locally does not wait on the initial ``request_approval`` claim
+    (``request_in_flight``) — only a competing decision forward
+    (``decision_in_progress``) blocks this. See
+    ``_has_competing_decision_operation`` for why.
+    """
     def _reject(sessions):
         for s in sessions:
             if s["id"] != sid:
@@ -769,7 +781,7 @@ def reject_action(
                 return {"success": False, "error": "No matching pending approval"}
             if current.get("status") != "pending":
                 return {"success": False, "error": f"Action already {current.get('status')}"}
-            active_reason = _has_active_approval_operation(s)
+            active_reason = _has_competing_decision_operation(s)
             if active_reason:
                 return {"success": False, "error": active_reason}
             valid, error = _validate_decision_ids(
@@ -831,6 +843,40 @@ def _is_forwarding_claim_active(action: dict) -> bool:
         return age <= FORWARDING_CLAIM_TIMEOUT_SECONDS
     except (TypeError, ValueError):
         return False
+
+
+def _has_competing_decision_operation(session: dict) -> str | None:
+    """Return a human-readable reason if a *decision* forward is actively
+    racing this session's pending approval, or ``None`` if a local
+    terminal decision (``approve_action``/``reject_action``) may proceed.
+
+    This is intentionally narrower than ``_has_active_approval_operation``:
+    it only looks at ``decision_in_progress`` — the reservation
+    ``prepare_decision`` takes while a decision is being forwarded
+    upstream, and the one operation a legacy local decision could
+    actually race with a conflicting outcome for the same action.
+
+    It deliberately does NOT consider ``request_in_flight``. That flag
+    marks the *initial* approval-request notification to TrueForge as
+    still claimed/being forwarded — set unconditionally by
+    ``request_approval`` whenever it creates a new pending approval (see
+    ``request_in_flight: True,  # Claim initial forward`` above). It is
+    unrelated to deciding the action locally: ``approve_action`` and
+    ``reject_action`` are documented as local-only helpers, and the
+    late tool-call binding flow (``set_approval_tool_call_id``) already
+    handles attaching a ``tool_call_id`` to an approved/rejected action
+    after the fact. Treating ``request_in_flight`` as blocking here would
+    make every immediate approve/reject fail, since that claim is present
+    on essentially every freshly created pending approval.
+
+    Must be called under the same session lock as the mutation it guards.
+    """
+    current = session.get("approval_state")
+    if not isinstance(current, dict) or current.get("status") != "pending":
+        return None
+    if current.get("decision_in_progress"):
+        return "An approval decision is currently being forwarded to TrueForge"
+    return None
 
 
 def _has_active_approval_operation(session: dict) -> str | None:

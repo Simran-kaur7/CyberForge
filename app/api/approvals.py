@@ -8,9 +8,12 @@ TrueForge create-turn returns an SSE stream. This module:
 Requires CYBERFORGE_API_KEY for containment decisions.
 """
 
+import logging
 import os
 import json
 import urllib.request
+
+logger = logging.getLogger(__name__)
 
 try:
     from fastapi import APIRouter, HTTPException, Header
@@ -198,7 +201,15 @@ def _tf_post_sse(path: str, body: dict) -> dict:
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"TrueForge returned HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
+        # Covers most network failures, including socket timeouts, since
+        # urllib wraps them here in most cases.
         raise RuntimeError("Cannot reach TrueForge") from exc
+    except (TimeoutError, OSError) as exc:
+        # Belt-and-suspenders: some timeout/connection failures (e.g. a bare
+        # socket.timeout/TimeoutError, ConnectionResetError) are not always
+        # wrapped in urllib.error.URLError depending on where they occur, so
+        # catch the broader OSError family explicitly and normalize it too.
+        raise RuntimeError("TrueForge request failed (network error)") from exc
 
 
 def _tf_get(path: str) -> dict:
@@ -218,14 +229,17 @@ def _tf_get(path: str) -> dict:
 
             return json.loads(raw)
 
-    except json.JSONDecodeError:
-        raise RuntimeError("TrueForge returned invalid JSON")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("TrueForge returned invalid JSON") from exc
 
-    except urllib.error.HTTPError:
-        raise RuntimeError("TrueForge returned an error")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError("TrueForge returned an error") from exc
 
-    except urllib.error.URLError:
-        raise RuntimeError("Cannot reach TrueForge")
+    except urllib.error.URLError as exc:
+        raise RuntimeError("Cannot reach TrueForge") from exc
+
+    except (TimeoutError, OSError) as exc:
+        raise RuntimeError("TrueForge request failed (network error)") from exc
 
 
 def _extract_identity_values(value) -> dict[str, set[str]]:
@@ -403,15 +417,19 @@ def request_containment_approval(
                         },
                     )
 
-            except RuntimeError as exc:
-                # Release request claim upon failure so concurrent retries can run
+            except Exception:
+                # Release request claim upon failure so concurrent retries can run.
+                # Broadened beyond RuntimeError: TimeoutError, OSError, and any
+                # other unexpected failure during forwarding must not leave the
+                # request claim stuck, since that would strand the local action.
                 release_request_claim(local_session_id, action_id)
 
-                # Keep detailed exception context in server logs only.
-                import logging
-                logging.warning(
-                    "TrueForge forward failed for session %s",
+                # Keep detailed exception context (including traceback) in
+                # server logs only; the client only sees a generic message.
+                logger.exception(
+                    "TrueForge forward failed for session=%s action=%s",
                     local_session_id,
+                    action_id,
                 )
 
                 # Return success=false so the client knows the request was NOT
@@ -538,7 +556,20 @@ def request_containment_approval(
                     owner_token=forwarding_owner_token,
                 )
 
-            except RuntimeError:
+            except Exception:
+                # Broadened beyond RuntimeError: any failure here — a timeout,
+                # a connection error, or anything unexpected — must release
+                # the forwarding claim. Otherwise forwarding_to_trueforge
+                # would remain True forever and the action could never be
+                # retried or resolved.
+                logger.exception(
+                    "Late-forward decision failed for session=%s action=%s "
+                    "tool_call_id=%s",
+                    local_session_id,
+                    action_id,
+                    tool_call_id,
+                )
+
                 release_forwarding_claim(
                     local_session_id,
                     action_id,
@@ -671,7 +702,18 @@ def _decide_containment(
                 body.reason,
                 thread_id,
             )
-        except RuntimeError:
+        except Exception:
+            # Broadened beyond RuntimeError so a timeout, connection error, or
+            # any other unexpected failure still fails the decision instead of
+            # leaving it stuck mid-forward.
+            logger.exception(
+                "TrueForge decision forwarding failed for session=%s "
+                "action=%s tool_call_id=%s",
+                body.session_id,
+                body.action_id,
+                tool_call_id,
+            )
+
             fail_decision(
                 body.session_id,
                 body.action_id,

@@ -1642,6 +1642,160 @@ def run_all():
             assert act.get("forwarding_owner") is None
     check("test_crashed_forwarding_claim_expires", t94)
 
+    # ------------------------------------------------------------------
+    # 95-101: Regression — request_in_flight must not block a local
+    # terminal decision (approve_action/reject_action). Only a competing
+    # decision_in_progress forward may block them; the late tool-call
+    # binding flow must keep working unchanged.
+    # ------------------------------------------------------------------
+
+    # 95: Immediate approve succeeds while request_in_flight is still set
+    def t95():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-IMM-1")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            assert r["success"] is True
+            aid = r["action_id"]
+            # request_approval claims request_in_flight for every fresh
+            # pending approval — confirm that's really the state here.
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["request_in_flight"] is True
+            # No release_request_claim call: approve_action must succeed
+            # immediately anyway.
+            ar = sdk_client.approve_action(sid, aid)
+            assert ar["success"] is True, ar
+            assert ar["status"] == "approved"
+        with_temp_sessions(body)
+    check("test_immediate_approve_despite_request_in_flight", t95)
+
+    # 96: Immediate reject succeeds while request_in_flight is still set
+    def t96():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-IMM-2")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "ISOLATE_HOST", {"host": "web-02"})
+            aid = r["action_id"]
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["request_in_flight"] is True
+            rr = sdk_client.reject_action(sid, aid)
+            assert rr["success"] is True, rr
+            assert rr["status"] == "rejected"
+        with_temp_sessions(body)
+    check("test_immediate_reject_despite_request_in_flight", t96)
+
+    # 97: Late tool-call binding still works after an immediate approve
+    # (no release_request_claim in between — the normal flow now that
+    # approve_action no longer requires the claim to be cleared first).
+    def t97():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-IMM-3")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            ar = sdk_client.approve_action(sid, aid)
+            assert ar["success"] is True
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-imm-1")
+            assert br["success"] is True
+            assert br.get("pending_decision") == "approved"
+        with_temp_sessions(body)
+    check("test_late_binding_after_immediate_approve", t97)
+
+    # 98: Late tool-call binding still works after an immediate reject
+    def t98():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-IMM-4")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "ISOLATE_HOST", {"host": "web-03"})
+            aid = r["action_id"]
+            rr = sdk_client.reject_action(sid, aid)
+            assert rr["success"] is True
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-imm-2")
+            assert br["success"] is True
+            assert br.get("pending_decision") == "rejected"
+        with_temp_sessions(body)
+    check("test_late_binding_after_immediate_reject", t98)
+
+    # 99: A genuinely competing operation — a decision already being
+    # forwarded (decision_in_progress) — still blocks approve_action.
+    # This is the protection that must be preserved.
+    def t99():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-IMM-5")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            pr = sdk_client.prepare_decision(sid, aid, "approved")
+            assert pr["success"] is True
+            blocked = sdk_client.approve_action(sid, aid)
+            assert blocked["success"] is False
+            assert "forwarded" in blocked["error"]
+            # Approval is untouched and still pending/in-progress.
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["status"] == "pending"
+            assert sess["approval_state"].get("decision_in_progress") is not None
+        with_temp_sessions(body)
+    check("test_decision_in_progress_still_blocks_approve", t99)
+
+    # 100: Same competing-operation protection for reject_action.
+    def t100():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-IMM-6")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "ISOLATE_HOST", {"host": "web-04"})
+            aid = r["action_id"]
+            pr = sdk_client.prepare_decision(sid, aid, "rejected")
+            assert pr["success"] is True
+            blocked = sdk_client.reject_action(sid, aid)
+            assert blocked["success"] is False
+            assert "forwarded" in blocked["error"]
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["status"] == "pending"
+        with_temp_sessions(body)
+    check("test_decision_in_progress_still_blocks_reject", t100)
+
+    # 101: _has_competing_decision_operation helper correctness — mirrors
+    # test_has_active_approval_operation (t48) but confirms this narrower
+    # helper ignores request_in_flight entirely, fresh or not.
+    def t101():
+        from app.sdk_client import _has_competing_decision_operation
+        from datetime import datetime, timezone
+        # No approval state / non-pending / pending-no-op → None
+        assert _has_competing_decision_operation({}) is None
+        assert _has_competing_decision_operation({"approval_state": None}) is None
+        assert _has_competing_decision_operation({
+            "approval_state": {"status": "approved", "action_id": "a"}
+        }) is None
+        assert _has_competing_decision_operation({
+            "approval_state": {"status": "pending", "action_id": "a"}
+        }) is None
+        # Fresh request_in_flight must NOT block (the regression case).
+        now_iso = datetime.now(timezone.utc).isoformat()
+        assert _has_competing_decision_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True,
+                "request_started_at": now_iso,
+            }
+        }) is None, "request_in_flight must never block a local decision"
+        # decision_in_progress must still block.
+        assert _has_competing_decision_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "decision_in_progress": {"decision": "approved", "token": "t"}
+            }
+        }) is not None
+        # Both set at once → still blocked by decision_in_progress alone.
+        assert _has_competing_decision_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "decision_in_progress": {"decision": "approved", "token": "t"},
+                "request_in_flight": True,
+                "request_started_at": now_iso,
+            }
+        }) is not None
+    check("test_has_competing_decision_operation", t101)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:
