@@ -738,7 +738,7 @@ def _has_active_approval_operation(session: dict) -> str | None:
         # Check lease expiry — a crashed/abandoned request must not block
         # reinvestigation or new approval requests indefinitely.
         request_started = current.get("request_started_at")
-        if request_started:
+        if request_started and isinstance(request_started, str):
             try:
                 started = datetime.fromisoformat(
                     request_started.replace("Z", "+00:00")
@@ -944,18 +944,23 @@ def set_approval_tool_call_id(
             if current_status in ("approved", "rejected"):
                 for action in s.get("actions", []):
                     if action.get("action_id") == action_id:
-                        if not action.get("forwarded_to_trueforge"):
-                            action["forwarded_to_trueforge"] = True
+                        # Use forwarding_to_trueforge as a recoverable
+                        # claim.  forwarded_to_trueforge is only set after
+                        # the TrueForge API call succeeds, so a crash
+                        # during forwarding leaves the decision retryable.
+                        if action.get("forwarded_to_trueforge"):
                             return {
                                 "success": True,
                                 "action_id": action_id,
-                                "pending_decision": current_status,
-                                "decided_by": action.get("decided_by"),
+                                "already_forwarded": True,
                             }
+                        if not action.get("forwarding_to_trueforge"):
+                            action["forwarding_to_trueforge"] = True
                         return {
                             "success": True,
                             "action_id": action_id,
-                            "already_forwarded": True,
+                            "pending_decision": current_status,
+                            "decided_by": action.get("decided_by"),
                         }
 
             return {"success": True, "action_id": action_id}
@@ -966,13 +971,18 @@ def set_approval_tool_call_id(
 
 
 def release_forwarding_claim(sid: str, action_id: str, error: str) -> dict:
-    """Release a late-forward claim after an upstream delivery failure."""
+    """Release a late-forward claim after an upstream delivery failure.
+
+    Clears both ``forwarding_to_trueforge`` and ``forwarded_to_trueforge``
+    so the decision can be retried on the next TrueForge response.
+    """
     def _release(sessions):
         for s in sessions:
             if s["id"] != sid:
                 continue
             for action in s.get("actions", []):
                 if action.get("action_id") == action_id:
+                    action["forwarding_to_trueforge"] = False
                     action["forwarded_to_trueforge"] = False
                     action["forward_error"] = error
                     s["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -980,6 +990,32 @@ def release_forwarding_claim(sid: str, action_id: str, error: str) -> dict:
             return {"success": False, "error": "Action not found"}
         return {"success": False, "error": "Session not found"}
     return _mutate_sessions(_release)
+
+
+def complete_forwarding(sid: str, action_id: str) -> dict:
+    """Transition forwarding_to_trueforge -> forwarded_to_trueforge
+    after the TrueForge API call succeeds.
+
+    A crash between set_approval_tool_call_id (which sets forwarding_to_trueforge)
+    and this call leaves the decision retryable: forwarding_to_trueforge is True
+    but forwarded_to_trueforge is False, so the next call re-enters the late-forward
+    path instead of suppressing it.
+    """
+    def _complete(sessions):
+        for s in sessions:
+            if s["id"] != sid:
+                continue
+            for action in s.get("actions", []):
+                if action.get("action_id") == action_id:
+                    action["forwarding_to_trueforge"] = False
+                    action["forwarded_to_trueforge"] = True
+                    action.pop("forward_error", None)
+                    s["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    return {"success": True, "action_id": action_id}
+            return {"success": False, "error": "Action not found"}
+        return {"success": False, "error": "Session not found"}
+    return _mutate_sessions(_complete)
+
 
 def persist_trueforge_session_id(sid: str, tf_session_id: str) -> dict:
     """Atomically persist a TrueForge session ID on the local session."""

@@ -286,6 +286,7 @@ def request_containment_approval(
             set_approval_tool_call_id,
             persist_trueforge_session_id,
             release_forwarding_claim,
+            complete_forwarding,
             release_request_claim,
         )
 
@@ -474,6 +475,10 @@ def request_containment_approval(
                     f"/api/v1/sessions/{tf_session_id}/turns",
                     {"input": [approval_input]},
                 )
+
+                # TrueForge accepted the decision — finalize the
+                # forwarding state so a crash-restart cannot re-forward.
+                complete_forwarding(local_session_id, action_id)
 
             except RuntimeError:
                 release_forwarding_claim(

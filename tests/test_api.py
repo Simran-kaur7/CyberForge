@@ -1027,6 +1027,246 @@ def run_all():
             assert ap.get("request_started_at") is None
     check("test_failed_request_clears_timestamp", t60)
 
+    # ------------------------------------------------------------------
+    # 61-68: Bug 1 regression — forwarding state recovery
+    # ------------------------------------------------------------------
+
+    # 61: Approved action enters forwarding state (forwarding_to_trueforge)
+    def t61():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-FWD-1")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            # set_approval_tool_call_id enters forwarding state
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-1")
+            assert br["success"] is True
+            assert br.get("pending_decision") == "approved"
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarding_to_trueforge") is True
+            assert act.get("forwarded_to_trueforge") is not True
+    check("test_approved_enters_forwarding_state", t61)
+
+    # 62: Crash/failure before TrueForge confirmation leaves it recoverable
+    def t62():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-FWD-2")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-2")
+            assert br.get("pending_decision") == "approved"
+            # Simulate crash: release forwarding claim (TrueForge failed)
+            sdk_client.release_forwarding_claim(sid, aid, "crash")
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarding_to_trueforge") is False
+            assert act.get("forwarded_to_trueforge") is False
+            # Decision is still retryable
+            br2 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-2")
+            assert br2.get("pending_decision") == "approved"
+    check("test_crash_before_confirmation_is_recoverable", t62)
+
+    # 63: Retry successfully forwards the decision
+    def t63():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-FWD-3")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            # First attempt: forwarding state
+            sdk_client.set_approval_tool_call_id(sid, aid, "tc-3")
+            sdk_client.release_forwarding_claim(sid, aid, "timeout")
+            # Retry: enters forwarding state again
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-3")
+            assert br.get("pending_decision") == "approved"
+            # Complete the forwarding
+            sdk_client.complete_forwarding(sid, aid)
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarded_to_trueforge") is True
+            assert act.get("forwarding_to_trueforge") is False
+    check("test_retry_successfully_forwards", t63)
+
+    # 64: Successful forwarding becomes terminal forwarded state
+    def t64():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-FWD-4")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            sdk_client.set_approval_tool_call_id(sid, aid, "tc-4")
+            sdk_client.complete_forwarding(sid, aid)
+            # Now it shows as already forwarded
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-4")
+            assert br.get("already_forwarded") is True
+            assert "pending_decision" not in br
+    check("test_successful_forwarding_is_terminal", t64)
+
+    # 65: Repeated forwarding does not duplicate the decision
+    def t65():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-FWD-5")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.approve_action(sid, aid)
+            sdk_client.set_approval_tool_call_id(sid, aid, "tc-5")
+            sdk_client.complete_forwarding(sid, aid)
+            # Second call sees already forwarded
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-5")
+            assert br.get("already_forwarded") is True
+            br2 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-5")
+            assert br2.get("already_forwarded") is True
+    check("test_repeated_forwarding_no_duplicate", t65)
+
+    # 66: Rejected actions have same recovery behavior
+    def t66():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-FWD-6")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.reject_action(sid, aid)
+            # Enter forwarding state
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-6")
+            assert br.get("pending_decision") == "rejected"
+            # Crash: release and retry
+            sdk_client.release_forwarding_claim(sid, aid, "crash")
+            br2 = sdk_client.set_approval_tool_call_id(sid, aid, "tc-6")
+            assert br2.get("pending_decision") == "rejected"
+            # Complete
+            sdk_client.complete_forwarding(sid, aid)
+            sess = sdk_client.get_session(sid)
+            act = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert act.get("forwarded_to_trueforge") is True
+    check("test_rejected_recovery_same_as_approved", t66)
+
+    # 67: Superseded actions remain rejected
+    def t67():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-FWD-7")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.update_session(sid, supersede_stale_approval=True, evidence_snapshot={"x": 1})
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-7")
+            assert br["success"] is False
+            assert "superseded" in br["error"]
+    check("test_superseded_still_rejected", t67)
+
+    # 68: Normal pending approval flow still works
+    def t68():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-FWD-8")
+            sid = s["id"]
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            br = sdk_client.set_approval_tool_call_id(sid, aid, "tc-8")
+            assert br["success"] is True
+            assert "pending_decision" not in br
+            sess = sdk_client.get_session(sid)
+            ap = sess["approval_state"]
+            assert ap["tool_call_id"] == "tc-8"
+            assert ap["status"] == "pending"
+    check("test_normal_pending_flow_intact", t68)
+
+    # ------------------------------------------------------------------
+    # 69-74: Bug 2 regression — malformed request_started_at
+    # ------------------------------------------------------------------
+
+    # 69: integer request_started_at treated as expired
+    def t69():
+        from app.sdk_client import _has_active_approval_operation
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True,
+                "request_started_at": 123,
+            }
+        }) is None, "Integer timestamp must be treated as expired"
+    check("test_malformed_timestamp_integer", t69)
+
+    # 70: dict request_started_at treated as expired
+    def t70():
+        from app.sdk_client import _has_active_approval_operation
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True,
+                "request_started_at": {"ts": "now"},
+            }
+        }) is None, "Dict timestamp must be treated as expired"
+    check("test_malformed_timestamp_dict", t70)
+
+    # 71: list request_started_at treated as expired
+    def t71():
+        from app.sdk_client import _has_active_approval_operation
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True,
+                "request_started_at": ["2026"],
+            }
+        }) is None, "List timestamp must be treated as expired"
+    check("test_malformed_timestamp_list", t71)
+
+    # 72: malformed string treated as expired
+    def t72():
+        from app.sdk_client import _has_active_approval_operation
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True,
+                "request_started_at": "not-a-date",
+            }
+        }) is None, "Malformed string must be treated as expired"
+    check("test_malformed_timestamp_string", t72)
+
+    # 73: valid fresh timestamp blocks
+    def t73():
+        from app.sdk_client import _has_active_approval_operation
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True,
+                "request_started_at": now_iso,
+            }
+        }) is not None, "Fresh timestamp must block"
+    check("test_valid_fresh_timestamp_blocks", t73)
+
+    # 74: valid expired timestamp does not block
+    def t74():
+        from app.sdk_client import _has_active_approval_operation, REQUEST_CLAIM_TIMEOUT_SECONDS
+        from datetime import datetime, timezone, timedelta
+        old_time = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=REQUEST_CLAIM_TIMEOUT_SECONDS + 60)
+        ).isoformat()
+        assert _has_active_approval_operation({
+            "approval_state": {
+                "status": "pending", "action_id": "a",
+                "request_in_flight": True,
+                "request_started_at": old_time,
+            }
+        }) is None, "Expired timestamp must not block"
+    check("test_valid_expired_timestamp_does_not_block", t74)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:
