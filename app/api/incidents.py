@@ -148,7 +148,10 @@ def investigate_incident(incident_id: str):
                     "agent": {
                         "spec": {
                             "model": {
-                                "name": "google-gemini/gemini-3-6-flash",
+                                "name": os.environ.get(
+                                    "TRUEFORGE_MODEL",
+                                    "google-gemini/gemini-3-6-flash",
+                                ),
                             },
                             "instructions": (
                                 "You are a SOC incident-response agent for CyberForge."
@@ -173,10 +176,17 @@ def investigate_incident(incident_id: str):
                                 "\n- successful_suspicious_login: +25 points"
                                 "\n- suspicious_process: +25 points"
                                 "\n- unusual_connection: +20 points"
-                                "\n- known_bad_source_ip: +10 points"
+                                "\n- source_ip (if on known-bad list): +10 points"
                                 "\n- Thresholds: 0-29 LOW, 30-59 MEDIUM, 60-79 HIGH, 80-100 CRITICAL"
                             ),
-                            # MCP servers configured in agent/agent_spec.js
+                            "mcp_servers": [
+                                {
+                                    "name": "cyberforge-tools",
+                                    "enable_tools": ["@all"],
+                                    "require_approval_for_tools": ["block_ip"],
+                                    "preload": False,
+                                },
+                            ],
                             "config": {
                                 "iteration_limit": 100,
                                 "sandbox": {
