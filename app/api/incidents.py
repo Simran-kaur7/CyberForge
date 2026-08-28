@@ -140,7 +140,7 @@ def investigate_incident(incident_id: str):
         try:
             tf_url = os.environ.get(
                 "TRUEFORGE_URL",
-                "http://127.0.0.1:8790",
+                "http://localhost:8790",
             ).rstrip("/")
 
             payload = json.dumps(
@@ -149,10 +149,34 @@ def investigate_incident(incident_id: str):
                         "spec": {
                             "model": {
                                 "name": "google-gemini/gemini-3-6-flash",
-                                "params": {
-                                    "reasoning_effort": "low",
-                                },
                             },
+                            "instructions": (
+                                "You are a SOC incident-response agent for CyberForge."
+                                "\n"
+                                "INVESTIGATION WORKFLOW:"
+                                "\n1. When asked to investigate an incident, dispatch two subagents in parallel:"
+                                "\n   - Subagent A: Runs search_security_logs + analyze_evidence (authentication and correlation)"
+                                "\n   - Subagent B: Runs check_system_activity (host process and network analysis)"
+                                "\n2. Merge findings from both subagents into a single risk_indicators dict."
+                                "\n3. Run risk_score.py in Code Mode (sandbox) using the merged indicators."
+                                "\n4. Present findings, risk level, and recommended action to the analyst."
+                                "\n5. If containment is recommended, request human approval before calling block_ip."
+                                "\n"
+                                "RULES:"
+                                "\n- NEVER call block_ip without explicit human approval."
+                                "\n- NEVER auto-contain, even with a CRITICAL risk score."
+                                "\n- Always explain WHY each signal is suspicious before recommending action."
+                                "\n- Use subagents for parallel evidence gathering — do not run tools sequentially."
+                                "\n"
+                                "SCORING (handled by risk_score.py in sandbox):"
+                                "\n- failed_attempts (>=20): +20 points"
+                                "\n- successful_suspicious_login: +25 points"
+                                "\n- suspicious_process: +25 points"
+                                "\n- unusual_connection: +20 points"
+                                "\n- known_bad_source_ip: +10 points"
+                                "\n- Thresholds: 0-29 LOW, 30-59 MEDIUM, 60-79 HIGH, 80-100 CRITICAL"
+                            ),
+                            # MCP servers configured in agent/agent_spec.js
                             "config": {
                                 "iteration_limit": 100,
                                 "sandbox": {
