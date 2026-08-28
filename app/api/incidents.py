@@ -1,5 +1,8 @@
+import json
 import logging
+import os
 import urllib.error
+import urllib.request
 
 try:
     from fastapi import APIRouter
@@ -25,6 +28,7 @@ from app.sdk_client import (
     create_session,
     find_session_by_incident,
     list_sessions,
+    persist_trueforge_session_id,
     search_security_logs,
     update_session,
 )
@@ -97,13 +101,17 @@ def investigate_incident(incident_id: str):
     if existing:
         local_session = existing
     else:
-        local_session = create_session(incident_id, evidence_snapshot=analysis)
+        local_session = create_session(
+            incident_id,
+            evidence_snapshot=analysis,
+        )
 
     # Keep session metadata consistent with actual investigation
     update_result = update_session(
         local_session["id"],
         evidence_snapshot=analysis,
     )
+
     if not update_result.get("success"):
         # Session persistence is required because the investigation result is
         # later used as the authoritative local session for approval actions.
@@ -120,21 +128,96 @@ def investigate_incident(incident_id: str):
 
     local_session_id = local_session["id"]
 
-    # Reuse existing TrueForge session if already linked, otherwise create new
+    # Reuse an existing TrueForge session when this CyberForge session
+    # already has one. Otherwise create a new TrueForge inline session.
+    #
+    # CyberForge owns the incident -> TrueForge session association locally.
+    # TrueForge's session-create API does not accept CyberForge-specific
+    # "title" or "metadata" fields.
     trueforge_session_id = local_session.get("trueforge_session_id")
+
     if not trueforge_session_id:
         try:
-            import os
-            import json as _json
-            import urllib.request as _req
-            from app.sdk_client import persist_trueforge_session_id
-            tf_url = os.environ.get("TRUEFORGE_URL", "http://localhost:8790")
-            payload = _json.dumps({
-                "title": f"Investigation: {incident_id}",
-                "metadata": {"incident_id": incident_id, "local_session_id": local_session_id},
-            }).encode()
-            r = _req.urlopen(
-                _req.Request(
+            tf_url = os.environ.get(
+                "TRUEFORGE_URL",
+                "http://localhost:8790",
+            ).rstrip("/")
+
+            payload = json.dumps(
+                {
+                    "agent": {
+                        "spec": {
+                            "model": {
+                                "name": os.environ.get(
+                                    "TRUEFORGE_MODEL",
+                                    "google-gemini/gemini-3-6-flash",
+                                ),
+                            },
+                            "instructions": (
+                                "You are a SOC incident-response agent for CyberForge."
+                                "\n"
+                                "INVESTIGATION WORKFLOW:"
+                                "\n1. When asked to investigate an incident, dispatch two subagents in parallel:"
+                                "\n   - Subagent A: Runs search_security_logs + analyze_evidence (authentication and correlation)"
+                                "\n   - Subagent B: Runs check_system_activity (host process and network analysis)"
+                                "\n2. Merge findings from both subagents into a single risk_indicators dict."
+                                "\n3. Run risk_score.py in Code Mode (sandbox) using the merged indicators."
+                                "\n4. Present findings, risk level, and recommended action to the analyst."
+                                "\n5. If containment is recommended, request human approval before calling block_ip."
+                                "\n"
+                                "RULES:"
+                                "\n- NEVER call block_ip without explicit human approval."
+                                "\n- NEVER auto-contain, even with a CRITICAL risk score."
+                                "\n- Always explain WHY each signal is suspicious before recommending action."
+                                "\n- Use subagents for parallel evidence gathering — do not run tools sequentially."
+                                "\n"
+                                "SCORING (handled by risk_score.py in sandbox):"
+                                "\n- failed_attempts (>=20): +20 points"
+                                "\n- successful_suspicious_login: +25 points"
+                                "\n- suspicious_process: +25 points"
+                                "\n- unusual_connection: +20 points"
+                                "\n- source_ip (if on known-bad list): +10 points"
+                                "\n- Thresholds: 0-29 LOW, 30-59 MEDIUM, 60-79 HIGH, 80-100 CRITICAL"
+                            ),
+                            "mcp_servers": [
+                                {
+                                    "name": "cyberforge-tools",
+                                    "enable_tools": ["@all"],
+                                    "require_approval_for_tools": ["block_ip"],
+                                    "preload": False,
+                                },
+                            ],
+                            "config": {
+                                "iteration_limit": 100,
+                                "sandbox": {
+                                    "enabled": True,
+                                    "file_downloads": True,
+                                },
+                                "dynamic_sub_agents": {
+                                    "enabled": True,
+                                },
+                                "context_management": {
+                                    "compaction": {
+                                        "enabled": True,
+                                    },
+                                    "large_tool_response": {
+                                        "enabled": True,
+                                    },
+                                },
+                                "generative_ui": {
+                                    "enabled": True,
+                                },
+                                "ask_user_questions": {
+                                    "enabled": True,
+                                },
+                            },
+                        },
+                    },
+                }
+            ).encode("utf-8")
+
+            response = urllib.request.urlopen(
+                urllib.request.Request(
                     f"{tf_url}/api/v1/sessions",
                     data=payload,
                     headers={"Content-Type": "application/json"},
@@ -142,22 +225,82 @@ def investigate_incident(incident_id: str):
                 ),
                 timeout=10,
             )
-            tf_resp = _json.loads(r.read().decode())
-            new_tf_id = tf_resp.get("id") or tf_resp.get("data", {}).get("id")
-            if new_tf_id:
-                # Compare-and-set: only persist if still None
-                cas_result = persist_trueforge_session_id(local_session_id, new_tf_id)
-                # Use the winning ID (another request may have set it first)
-                trueforge_session_id = cas_result.get("trueforge_session_id", new_tf_id)
-        except (urllib.error.URLError, urllib.error.HTTPError, ConnectionError, TimeoutError) as exc:
-            # Expected: TrueForge genuinely unavailable — operate in local-only mode
-            logger.info("TrueForge unavailable for session %s: %s", local_session_id, type(exc).__name__)
+
+            tf_resp = json.loads(
+                response.read().decode("utf-8")
+            )
+
+            new_tf_id = (
+                tf_resp.get("id")
+                or tf_resp.get("data", {}).get("id")
+            )
+
+            if not new_tf_id:
+                raise RuntimeError(
+                    "TrueForge created a session without returning an id."
+                )
+
+            # Persist the association locally. The local CyberForge session
+            # remains the authoritative mapping between incident and
+            # TrueForge session.
+            cas_result = persist_trueforge_session_id(
+                local_session_id,
+                new_tf_id,
+            )
+
+            if not cas_result.get("success"):
+                logger.warning(
+                    "Failed to persist TrueForge session %s for CyberForge "
+                    "session %s: %s",
+                    new_tf_id,
+                    local_session_id,
+                    cas_result.get("error", "unknown"),
+                )
+            else:
+                # Use the ID actually stored by the compare-and-set operation.
+                # If another concurrent request won the race, this should be
+                # the already-persisted TrueForge session ID.
+                trueforge_session_id = cas_result.get(
+                    "trueforge_session_id",
+                    new_tf_id,
+                )
+
+                logger.info(
+                    "Linked CyberForge session %s to TrueForge session %s",
+                    local_session_id,
+                    trueforge_session_id,
+                )
+
+        except (
+            urllib.error.URLError,
+            urllib.error.HTTPError,
+            ConnectionError,
+            TimeoutError,
+        ) as exc:
+            # TrueForge genuinely unavailable — retain local-only operation.
+            logger.info(
+                "TrueForge unavailable for session %s: %s",
+                local_session_id,
+                type(exc).__name__,
+            )
+
         except (ValueError, KeyError) as exc:
-            # Unexpected: TrueForge returned something we can't parse
-            logger.warning("Unexpected TrueForge response for session %s: %s", local_session_id, type(exc).__name__)
+            # TrueForge returned a response that could not be interpreted.
+            logger.warning(
+                "Unexpected TrueForge response for session %s: %s",
+                local_session_id,
+                type(exc).__name__,
+            )
+
         except Exception as exc:
-            # Truly unexpected error — log so it doesn't disappear silently
-            logger.error("Unhandled TrueForge error for session %s: %s", local_session_id, exc, exc_info=True)
+            # Keep the investigation endpoint alive, but do not silently hide
+            # unexpected integration failures.
+            logger.error(
+                "Unhandled TrueForge error for session %s: %s",
+                local_session_id,
+                exc,
+                exc_info=True,
+            )
 
     return {
         "success": True,
