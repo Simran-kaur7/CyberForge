@@ -281,7 +281,7 @@ main.incident-main{ display:grid; grid-template-columns:1.55fr 1fr; gap:26px; }
 .copy-btn:hover{ color:var(--spark); border-color:#4dd8ff55; }
 
 /* ---------- Toasts ---------- */
-.toast-stack{ position:fixed; bottom:24px; right:24px; display:flex; flex-direction:column; gap:10px; z-index:9998; max-width:320px; }
+.toast-stack{ position:fixed; bottom:24px; right:24px; display:flex; flex-direction:column; gap:10px; z-index:9998; max-width:320px; pointer-events:none; }
 .toast{
   font-family:var(--font-mono); font-size:12.5px; padding:13px 16px; border:1px solid var(--steel-line);
   background:var(--panel-hi); color:var(--ink); box-shadow:0 8px 24px #00000060;
