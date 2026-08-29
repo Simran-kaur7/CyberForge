@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,10 +66,26 @@ def block_ip(ip_address: str) -> dict:
         "mode": "SIMULATED"
     })
 
-    FIREWALL_FILE.write_text(
-        json.dumps(firewall, indent=2),
-        encoding="utf-8"
+    # Atomic write: write to a temp file, then rename to prevent
+    # a concurrent reader from seeing a partially written file.
+    import tempfile
+    firewall_dir = FIREWALL_FILE.parent
+    firewall_dir.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=str(firewall_dir), suffix=".tmp", prefix="firewall_"
     )
+    try:
+        with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
+            f.write(json.dumps(firewall, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, str(FIREWALL_FILE))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
     return {
         "success": True,

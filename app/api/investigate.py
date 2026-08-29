@@ -64,6 +64,7 @@ _PERSISTENCE_FAILURE_DETAIL = "Investigation session could not be persisted."
 # target-specific evidence collection runs against the correct IP.
 _INCIDENT_TARGET_MAP: dict[str, str] = {
     "INC-1024": "10.0.0.25",
+    "INC-DAY5-E2E": "10.0.0.25",
 }
 
 
@@ -154,10 +155,14 @@ def investigate(body: InvestigationRequest):
     # so an incident without a target would otherwise produce incomplete
     # investigations.  This does NOT fabricate evidence -- it merely tells
     # the investigation pipeline which IP to analyse.
-    if not target_ip and incident_id:
-        mapped_target = _INCIDENT_TARGET_MAP.get(incident_id.upper())
-        if mapped_target:
-            target_ip = mapped_target
+    # Canonicalize to uppercase so that mixed-case spellings of the same
+    # incident (e.g. "inc-day5-e2e") share the same session identity.
+    if incident_id:
+        canonical = incident_id.upper()
+        if canonical in _INCIDENT_TARGET_MAP:
+            incident_id = canonical
+            if not target_ip:
+                target_ip = _INCIDENT_TARGET_MAP[canonical]
 
     try:
         result = run_investigation(query, target_ip)

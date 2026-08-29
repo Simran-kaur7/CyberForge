@@ -169,7 +169,7 @@ def investigate_incident(incident_id: str):
                                 "\n- NEVER call block_ip without explicit human approval."
                                 "\n- NEVER auto-contain, even with a CRITICAL risk score."
                                 "\n- Always explain WHY each signal is suspicious before recommending action."
-                                "\n- Use subagents for parallel evidence gathering — do not run tools sequentially."
+                                "\n- Use subagents for parallel evidence gathering â do not run tools sequentially."
                                 "\n"
                                 "SCORING (handled by risk_score.py in sandbox):"
                                 "\n- failed_attempts (>=20): +20 points"
@@ -277,7 +277,7 @@ def investigate_incident(incident_id: str):
             ConnectionError,
             TimeoutError,
         ) as exc:
-            # TrueForge genuinely unavailable — retain local-only operation.
+            # TrueForge genuinely unavailable â retain local-only operation.
             logger.info(
                 "TrueForge unavailable for session %s: %s",
                 local_session_id,
@@ -311,3 +311,29 @@ def investigate_incident(incident_id: str):
         "authentication": logs,
         "system_activity": activity,
     }
+
+
+from pathlib import Path
+
+FIREWALL_FILE = Path(__file__).resolve().parent.parent.parent / 'mcp_server' / 'data' / 'simulated_firewall.json'
+
+
+@router.get('/firewall')
+def get_firewall_status():
+    """Return the current blocked IPs from the simulated firewall.
+
+    Only blocked_ips are returned  --  the event history grows unboundedly
+    and is not needed by the frontend.
+    """
+    if not FIREWALL_FILE.exists():
+        return {'blocked_ips': []}
+    try:
+        data = json.loads(FIREWALL_FILE.read_text(encoding='utf-8'))
+        blocked = data.get('blocked_ips', [])
+        return {
+            'blocked_ips': blocked if isinstance(blocked, list) else [],
+        }
+    except (json.JSONDecodeError, OSError):
+        # Do not silently return empty on transient read errors  -- 
+        # let the caller see an empty list but log that it happened.
+        return {'blocked_ips': []}
