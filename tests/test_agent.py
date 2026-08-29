@@ -1418,6 +1418,185 @@ class TestSessionPersistenceCompleteness:
 
 
 # ===========================================================================
+#  TestIncidentTargetResolution
+# ===========================================================================
+class TestIncidentTargetResolution:
+    """Verify that known incidents auto-resolve their target IP."""
+
+    def test_inc1024_resolves_to_demo_target(self):
+        """INC-1024 without explicit target_ip must resolve to 10.0.0.25."""
+        import tempfile
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest, _INCIDENT_TARGET_MAP
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                fake = {
+                    "success": True, "status": "complete",
+                    "evidence_complete": True, "query": "test",
+                    "target_ip": "10.0.0.25", "severity": "HIGH",
+                    "risk_score": {"score": 80, "level": "HIGH", "max_score": 100, "breakdown": {}},
+                    "findings": [], "evidence": [], "tools_used": ["search_security_logs", "check_system_activity", "analyze_evidence", "risk_score"],
+                    "recommendation": "test", "containment_allowed": True,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation") as mock_run:
+                    mock_run.return_value = fake
+                    result = investigate(InvestigationRequest(
+                        query="Investigate suspicious activity",
+                        incident_id="INC-1024",
+                    ))
+                    # Verify run_investigation was called with the mapped target
+                    mock_run.assert_called_once_with("Investigate suspicious activity", "10.0.0.25")
+                    assert result["target_ip"] == "10.0.0.25"
+                    assert result["status"] == "complete"
+                    assert result["evidence_complete"] is True
+                    assert result["containment_allowed"] is True
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
+    def test_explicit_target_overrides_mapping(self):
+        """Explicit target_ip must not be overridden by the incident mapping."""
+        import tempfile
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                fake = {
+                    "success": True, "status": "complete",
+                    "evidence_complete": True, "query": "test",
+                    "target_ip": "192.168.1.50", "severity": "LOW",
+                    "risk_score": {"score": 0, "level": "UNKNOWN", "max_score": 100, "breakdown": {}},
+                    "findings": [], "evidence": [], "tools_used": ["check_system_activity"],
+                    "recommendation": "test", "containment_allowed": False,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation") as mock_run:
+                    mock_run.return_value = fake
+                    result = investigate(InvestigationRequest(
+                        query="Investigate 192.168.1.50",
+                        target_ip="192.168.1.50",
+                        incident_id="INC-1024",
+                    ))
+                    # Explicit target must be used, not the mapped one
+                    mock_run.assert_called_once_with("Investigate 192.168.1.50", "192.168.1.50")
+                    assert result["target_ip"] == "192.168.1.50"
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
+    def test_unknown_incident_no_fabrication(self):
+        """Unknown incident_id must not fabricate a target IP."""
+        import tempfile
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                fake = {
+                    "success": True, "status": "partial",
+                    "evidence_complete": False, "query": "test",
+                    "target_ip": "unknown", "severity": "UNKNOWN",
+                    "risk_score": {"score": None, "level": "UNKNOWN", "max_score": 100, "breakdown": {}},
+                    "findings": [], "evidence": [], "tools_used": ["check_system_activity"],
+                    "recommendation": "test", "containment_allowed": False,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation") as mock_run:
+                    mock_run.return_value = fake
+                    result = investigate(InvestigationRequest(
+                        query="Investigate something",
+                        incident_id="INC-UNKNOWN",
+                    ))
+                    # No target should be fabricated
+                    mock_run.assert_called_once_with("Investigate something", None)
+                    assert result["target_ip"] == "unknown"
+                    assert result["status"] == "partial"
+                    assert result["containment_allowed"] is False
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
+    def test_no_incident_no_target_remains_safe(self):
+        """Investigation without incident_id or target_ip remains safely partial."""
+        import tempfile
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                fake = {
+                    "success": True, "status": "partial",
+                    "evidence_complete": False, "query": "test",
+                    "target_ip": "unknown", "severity": "UNKNOWN",
+                    "risk_score": {"score": None, "level": "UNKNOWN", "max_score": 100, "breakdown": {}},
+                    "findings": [], "evidence": [], "tools_used": ["check_system_activity"],
+                    "recommendation": "test", "containment_allowed": False,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation") as mock_run:
+                    mock_run.return_value = fake
+                    result = investigate(InvestigationRequest(
+                        query="Investigate something",
+                    ))
+                    mock_run.assert_called_once_with("Investigate something", None)
+                    assert result["target_ip"] == "unknown"
+                    assert result["containment_allowed"] is False
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
+    def test_mixed_case_incident_resolves(self):
+        """Lowercase/mixed-case incident IDs must still resolve the target."""
+        import tempfile
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                fake = {
+                    "success": True, "status": "complete",
+                    "evidence_complete": True, "query": "test",
+                    "target_ip": "10.0.0.25", "severity": "HIGH",
+                    "risk_score": {"score": 80, "level": "HIGH", "max_score": 100, "breakdown": {}},
+                    "findings": [], "evidence": [], "tools_used": [],
+                    "recommendation": "test", "containment_allowed": True,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation") as mock_run:
+                    mock_run.return_value = fake
+                    for iid in ["inc-1024", "Inc-1024", "INC-1024"]:
+                        mock_run.reset_mock()
+                        investigate(InvestigationRequest(
+                            query="test", incident_id=iid,
+                        ))
+                        mock_run.assert_called_once_with("test", "10.0.0.25")
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
+    def test_mapping_constant_is_consistent(self):
+        """The mapping constant must be present and contain valid IPs."""
+        from app.api.investigate import _INCIDENT_TARGET_MAP, _validate_ip
+        assert "INC-1024" in _INCIDENT_TARGET_MAP
+        for iid, ip in _INCIDENT_TARGET_MAP.items():
+            assert isinstance(ip, str), f"Target for {iid} must be a string"
+            assert _validate_ip(ip), f"Target {ip} for {iid} is not a valid IPv4 address"
+
+
+# ===========================================================================
 #  Run all
 # ===========================================================================
 def run_all():
@@ -1449,6 +1628,7 @@ def run_all():
         TestMalformedIpNotTruncated,
         TestNullRiskNotZero,
         TestSessionPersistenceCompleteness,
+        TestIncidentTargetResolution,
     ]
 
     for cls in test_classes:

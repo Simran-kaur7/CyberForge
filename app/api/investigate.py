@@ -58,6 +58,14 @@ _INCIDENT_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]+")
 
 _PERSISTENCE_FAILURE_DETAIL = "Investigation session could not be persisted."
 
+# Known incident-to-target mappings for the demo dataset.
+# When an incident_id is provided without an explicit target_ip,
+# the investigation resolves the target automatically so that
+# target-specific evidence collection runs against the correct IP.
+_INCIDENT_TARGET_MAP: dict[str, str] = {
+    "INC-1024": "10.0.0.25",
+}
+
 
 class InvestigationRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=MAX_QUERY_LENGTH)
@@ -140,6 +148,16 @@ def investigate(body: InvestigationRequest):
             )
 
     incident_id = _normalize_incident_id(getattr(body, "incident_id", None))
+
+    # Resolve target from incident mapping when no explicit target is given.
+    # The demo dataset contains target-specific evidence only for known IPs,
+    # so an incident without a target would otherwise produce incomplete
+    # investigations.  This does NOT fabricate evidence -- it merely tells
+    # the investigation pipeline which IP to analyse.
+    if not target_ip and incident_id:
+        mapped_target = _INCIDENT_TARGET_MAP.get(incident_id.upper())
+        if mapped_target:
+            target_ip = mapped_target
 
     try:
         result = run_investigation(query, target_ip)
