@@ -669,6 +669,12 @@ def complete_decision(sid: str, aid: str, token: str) -> dict:
                     action.pop("forward_error", None)
                     break
 
+            # Resolve the incident lifecycle.  Both approved (contained)
+            # and rejected (false-alarm) represent terminal analyst
+            # decisions — the incident is no longer active.
+            if s.get("status") != "resolved":
+                s["status"] = "resolved"
+
             s["updated_at"] = now
             return {
                 "success": True,
