@@ -8,8 +8,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/cyber-background.css">
 </head>
 <body>
+<div class="cyber-bg-layer" aria-hidden="true"><span class="cyber-node n1"></span><span class="cyber-node n2"></span><span class="cyber-node n3"></span><span class="cyber-node n4"></span><span class="cyber-node n5"></span><span class="cyber-signal s1"></span><span class="cyber-signal s2"></span><span class="cyber-signal s3"></span><span class="cyber-data d1">AUTH  01 7F A2
+TCP   44 0C 91</span><span class="cyber-data d2">HOST  10.0.0.25
+PORT  4444</span><span class="cyber-data d3">EVIDENCE → CORRELATION → RISK</span></div>
 
 <a class="skip-link" href="#main-content">Skip to content</a>
 <canvas id="emberCanvas" aria-hidden="true"></canvas>
@@ -34,308 +38,36 @@
 </nav>
 
 <main id="main-content">
-
   <section class="stats-row" aria-label="Summary metrics" style="margin-bottom:0;padding-top:0;">
     <div class="stat-card"><div class="stat-value accent" id="stat-open">0</div><div class="stat-label">Open Incidents</div></div>
     <div class="stat-card"><div class="stat-value" id="stat-risk">--</div><div class="stat-label">Avg. Risk Score</div></div>
     <div class="stat-card"><div class="stat-value ok" id="stat-resolved">0</div><div class="stat-label">Resolved</div></div>
     <div class="stat-card"><div class="stat-value ok">99.8%</div><div class="stat-label">Agent Uptime</div></div>
   </section>
-
   <section id="active" style="margin-top:56px;">
     <div class="section-head"><h2>Active Incidents</h2><span class="count" id="active-count">2 open</span></div>
-
-    <div class="toolbar">
-      <input type="text" class="search-input" id="search-input" placeholder="Search by incident ID or description…" aria-label="Search incidents">
-      <select class="sort-select" id="sort-select" aria-label="Sort incidents">
-        <option value="risk">Sort: Highest risk</option>
-        <option value="recent">Sort: Most recent</option>
-        <option value="id">Sort: Incident ID</option>
-      </select>
-    </div>
-
-    <div class="incident-grid" id="incident-grid" aria-live="polite">
-      </div>
-    <div class="empty-state" id="empty-state" style="display:none;">No incidents match your search.</div>
+    <div class="toolbar"><input type="text" class="search-input" id="search-input" placeholder="Search by incident ID or description…" aria-label="Search incidents"><select class="sort-select" id="sort-select" aria-label="Sort incidents"><option value="risk">Sort: Highest risk</option><option value="recent">Sort: Most recent</option><option value="id">Sort: Incident ID</option></select></div>
+    <div class="incident-grid" id="incident-grid" aria-live="polite"></div><div class="empty-state" id="empty-state" style="display:none;">No incidents match your search.</div>
   </section>
-
-  <section id="resolved">
-    <div class="section-head"><h2>Previously Investigated</h2><span class="count" id="resolved-count">0 resolved</span></div>
-    <ul class="log-list" id="resolved-list">
-        <li><span class="evidence-placeholder">Loading…</span></li>
-      </ul>
-  </section>
-
+  <section id="resolved"><div class="section-head"><h2>Previously Investigated</h2><span class="count" id="resolved-count">0 resolved</span></div><ul class="log-list" id="resolved-list"><li><span class="evidence-placeholder">Loading…</span></li></ul></section>
 </main>
-
 <footer>CYBERFORGE · Built for The Agent Harness Hackathon · Human approval required before any response action</footer>
-
 <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
-
 <script>
-  function openIncident(incidentId){
-    window.location.href = `incident.html?id=${incidentId}`;
-  }
-
-  // ---- toasts ----
-  function toast(message, type='info'){
-    const stack = document.getElementById('toast-stack');
-    const el = document.createElement('div');
-    el.className = `toast ${type}`;
-    el.textContent = message;
-    stack.appendChild(el);
-    setTimeout(() => el.remove(), 3500);
-  }
-
-  // ---- search + sort (uses live DOM queries for dynamic cards) ----
-  const searchInput = document.getElementById('search-input');
-  const sortSelect = document.getElementById('sort-select');
-  const grid = document.getElementById('incident-grid');
-  const emptyState = document.getElementById('empty-state');
-  const activeCount = document.getElementById('active-count');
-
-  function riskWeight(r){ const n = Number(r); return Number.isFinite(n) ? n : 0; }
-
-  function refreshList(){
-    const q = searchInput.value.trim().toLowerCase();
-    const sort = sortSelect.value;
-    const cards = Array.from(grid.querySelectorAll('.tilt-card'));
-
-    let visible = cards.filter(c => {
-      const hay = `${c.dataset.id} ${c.dataset.desc}`.toLowerCase();
-      const match = hay.includes(q);
-      c.style.display = match ? '' : 'none';
-      return match;
-    });
-
-    const sorted = [...visible].sort((a,b) => {
-      if (sort === 'risk') return riskWeight(b.dataset.risk) - riskWeight(a.dataset.risk);
-      if (sort === 'recent') return Number(b.dataset.created) - Number(a.dataset.created);
-      if (sort === 'id') return a.dataset.id.localeCompare(b.dataset.id);
-      return 0;
-    });
-    sorted.forEach(c => grid.appendChild(c));
-
-    emptyState.style.display = visible.length === 0 ? 'block' : 'none';
-    activeCount.textContent = `${visible.length} open`;
-  }
-
-  function rebindControls(){
-    refreshList();
-    bindCardTilt();
-    bindReticle();
-  }
-
-  searchInput.addEventListener('input', refreshList);
-  sortSelect.addEventListener('change', refreshList);
-
-  // ---- custom reticle cursor ----
-  const isCoarse = window.matchMedia('(pointer: coarse)').matches;
-  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const reticle = document.getElementById('reticle');
-  function bindReticle(){
-    if (isCoarse || !reticle) return;
-    document.querySelectorAll('button, a, .tilt-card, input, select').forEach(el=>{
-      if (el.dataset.reticleBound) return;
-      el.dataset.reticleBound = 'true';
-      el.addEventListener('mouseenter', ()=>{
-        reticle.classList.add('active');
-        if (el.closest('.risk-high, .risk-critical')) reticle.classList.add('risk');
-        else if (el.closest('.risk-low')) reticle.classList.add('ok');
-      });
-      el.addEventListener('mouseleave', ()=> reticle.classList.remove('active','risk','ok'));
-    });
-  }
-  if (!isCoarse) {
-    let mx=0,my=0,cx=0,cy=0;
-    window.addEventListener('mousemove', e=>{ mx=e.clientX; my=e.clientY; });
-    function loop(){ cx += (mx-cx)*0.22; cy += (my-cy)*0.22; reticle.style.transform = `translate(${cx}px,${cy}px)`; requestAnimationFrame(loop); }
-    loop();
-    bindReticle();
-  }
-
-  // ---- 3D tilt on cards ----
-  function bindCardTilt(){
-    if (isCoarse || reduceMotion) return;
-    grid.querySelectorAll('.tilt-card').forEach(card => {
-      if (card.dataset.tiltBound) return;
-      card.dataset.tiltBound = 'true';
-      card.addEventListener('mousemove', e=>{
-        const r = card.getBoundingClientRect();
-        const x = e.clientX - r.left, y = e.clientY - r.top;
-        const rx = ((y / r.height) - 0.5) * -8;
-        const ry = ((x / r.width) - 0.5) * 8;
-        card.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
-      });
-      card.addEventListener('mouseleave', ()=>{
-        card.style.transform = 'perspective(900px) rotateX(0) rotateY(0) translateZ(0)';
-      });
-    });
-  }
-  bindCardTilt();
-
-  // ---- ambient ember particles ----
-  const canvas = document.getElementById('emberCanvas');
-  const ctx = canvas.getContext('2d');
-  let w,h,embers=[];
-  function resize(){ w=canvas.width=window.innerWidth; h=canvas.height=window.innerHeight; }
-  resize(); window.addEventListener('resize', resize);
-  function makeEmber(){ return { x:Math.random()*w, y:h+20, r:Math.random()*1.6+0.4, sp:Math.random()*0.5+0.15, drift:(Math.random()-0.5)*0.4, a:Math.random()*0.5+0.2 }; }
-  const count = reduceMotion ? 0 : 46;
-  for (let i=0;i<count;i++) embers.push(makeEmber());
-  function draw(){
-    ctx.clearRect(0,0,w,h);
-    embers.forEach(p=>{
-      p.y -= p.sp; p.x += p.drift;
-      if (p.y < -20) { Object.assign(p, makeEmber()); p.y = h+10; }
-      ctx.beginPath();
-      ctx.fillStyle = `rgba(255,138,61,${p.a})`;
-      ctx.shadowColor = 'rgba(255,138,61,0.8)';
-      ctx.shadowBlur = 4;
-      ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
-      ctx.fill();
-    });
-    if (count>0) requestAnimationFrame(draw);
-  }
-  draw();
-
-
-  // ---- load incidents from local sessions API ----
-  async function loadSessions(){
-    const grid = document.getElementById('incident-grid');
-    const resolvedList = document.getElementById('resolved-list');
-    try {
-      const resp = await fetch('/api/sessions');
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      const sessions = await resp.json();
-      if (!Array.isArray(sessions) || sessions.length === 0) {
-        grid.innerHTML = '<div class="empty-state">No active incidents. Start an investigation from the agent.</div>';
-        rebindControls();
-        return;
-      }
-      const active = sessions.filter(s => s.status !== 'resolved');
-      const resolved = sessions.filter(s => s.status === 'resolved');
-
-      // Update summary counts
-      document.getElementById('stat-open').textContent = active.length;
-      document.getElementById('stat-resolved').textContent = resolved.length;
-      document.getElementById('resolved-count').textContent = resolved.length + ' resolved';
-
-      // Compute average risk score from active sessions
-      // Only include sessions that actually have a risk_score (not null/undefined)
-      const riskScores = active.map(s => {
-        if (s.risk_score && typeof s.risk_score === 'object') {
-          const raw = s.risk_score.score;
-          if (raw === null || raw === undefined) return null;
-          const n = Number(raw);
-          return Number.isFinite(n) ? n : null;
-        }
-        if (s.risk_score !== null && s.risk_score !== undefined) {
-          const n = Number(s.risk_score);
-          return Number.isFinite(n) ? n : null;
-        }
-        return null;
-      }).filter(n => n !== null);
-      const avgRisk = riskScores.length > 0 ? Math.round(riskScores.reduce((a,b)=>a+b,0) / riskScores.length) : '--';
-      document.getElementById('stat-risk').textContent = avgRisk;
-
-      // Build cards with DOM elements (no innerHTML with user data)
-      grid.innerHTML = '';
-      active.forEach(s => {
-        const card = document.createElement('div');
-        card.className = 'tilt-card';
-        card.dataset.id = s.incident_id || s.id;
-        card.dataset.desc = '';
-        var riskScore = null;
-        var riskLevel = 'unknown';
-        if (s.risk_score && typeof s.risk_score === 'object') {
-          const raw = s.risk_score.score;
-          if (raw !== null && raw !== undefined) {
-            const n = Number(raw);
-            riskScore = Number.isFinite(n) ? n : null;
-          }
-          riskLevel = (s.risk_score.level || 'MEDIUM').toLowerCase();
-        } else if (s.risk_score !== null && s.risk_score !== undefined) {
-          const n = Number(s.risk_score);
-          riskScore = Number.isFinite(n) ? n : null;
-          if (riskScore !== null) {
-            riskLevel = riskScore >= 80 ? 'critical' : riskScore >= 60 ? 'high' : riskScore >= 30 ? 'medium' : 'low';
-          }
-        }
-        var displayScore = riskScore;
-        var createdTs = s.created_at ? new Date(s.created_at).getTime() : 0;
-        card.dataset.risk = String(riskScore);
-        card.dataset.created = String(createdTs);
-
-        const eyebrow = document.createElement('div');
-        eyebrow.className = 'eyebrow';
-        eyebrow.textContent = 'Active Incident';
-
-        const incId = document.createElement('div');
-        incId.className = 'inc-id';
-        incId.textContent = s.incident_id || s.id;
-
-        const row = document.createElement('div');
-        row.className = 'row';
-        const badge = document.createElement('span');
-        var hasAssessed = displayScore !== null;
-        if (hasAssessed) {
-          badge.textContent = riskLevel.toUpperCase() + ' ' + displayScore;
-          badge.className = 'risk-badge risk-' + riskLevel;
-        } else {
-          badge.textContent = s.risk_score && s.risk_score.level ? s.risk_score.level.toUpperCase() : 'Unassessed';
-          badge.className = 'risk-badge';
-        }
-        row.appendChild(badge);
-        const btn = document.createElement('button');
-        btn.className = 'btn btn-open';
-        btn.textContent = 'Open Incident \u2192';
-        btn.addEventListener('click', function() { openIncident(s.incident_id || s.id); });
-
-        card.appendChild(eyebrow);
-        card.appendChild(incId);
-        card.appendChild(row);
-        card.appendChild(btn);
-        grid.appendChild(card);
-      });
-
-      if (active.length === 0) {
-        grid.innerHTML = '<div class="empty-state">No active incidents.</div>';
-      }
-
-      // Resolved list
-      resolvedList.innerHTML = '';
-      resolved.forEach(s => {
-        const li = document.createElement('li');
-        const span = document.createElement('span');
-        span.className = 'id';
-        span.textContent = s.incident_id || s.id;
-        const status = document.createElement('span');
-        status.className = 'status-resolved';
-        status.textContent = 'RESOLVED';
-        const reopen = document.createElement('button');
-        reopen.className = 'reopen-btn';
-        reopen.textContent = 'Reopen';
-        reopen.addEventListener('click', function() { openIncident(s.incident_id || s.id); });
-        li.appendChild(span);
-        li.appendChild(status);
-        li.appendChild(reopen);
-        resolvedList.appendChild(li);
-      });
-      if (resolved.length === 0) {
-        resolvedList.innerHTML = '<li><span class="evidence-placeholder">No resolved incidents</span></li>';
-      }
-
-      rebindControls();
-    } catch(e) {
-      grid.innerHTML = '<div class="empty-state">Backend not connected. Start an investigation from the agent.</div>';
-    }
-  }
-  loadSessions();
-
-  // welcome toast
-  window.addEventListener('load', () => toast('CyberForge dashboard loaded', 'info'));
+function openIncident(incidentId){window.location.href=`incident.html?id=${incidentId}`}
+function toast(message,type='info'){const stack=document.getElementById('toast-stack');const el=document.createElement('div');el.className=`toast ${type}`;el.textContent=message;stack.appendChild(el);setTimeout(()=>el.remove(),3500)}
+const searchInput=document.getElementById('search-input'),sortSelect=document.getElementById('sort-select'),grid=document.getElementById('incident-grid'),emptyState=document.getElementById('empty-state'),activeCount=document.getElementById('active-count');
+function riskWeight(r){const n=Number(r);return Number.isFinite(n)?n:0}
+function refreshList(){const q=searchInput.value.trim().toLowerCase(),sort=sortSelect.value,cards=Array.from(grid.querySelectorAll('.tilt-card'));let visible=cards.filter(c=>{const hay=`${c.dataset.id} ${c.dataset.desc}`.toLowerCase(),match=hay.includes(q);c.style.display=match?'':'none';return match});const sorted=[...visible].sort((a,b)=>sort==='risk'?riskWeight(b.dataset.risk)-riskWeight(a.dataset.risk):sort==='recent'?Number(b.dataset.created)-Number(a.dataset.created):sort==='id'?a.dataset.id.localeCompare(b.dataset.id):0);sorted.forEach(c=>grid.appendChild(c));emptyState.style.display=visible.length===0?'block':'none';activeCount.textContent=`${visible.length} open`}
+function rebindControls(){refreshList();bindCardTilt();bindReticle()}
+searchInput.addEventListener('input',refreshList);sortSelect.addEventListener('change',refreshList);
+const isCoarse=window.matchMedia('(pointer: coarse)').matches,reduceMotion=window.matchMedia('(prefers-reduced-motion: reduce)').matches,reticle=document.getElementById('reticle');
+function bindReticle(){if(isCoarse||!reticle)return;document.querySelectorAll('button,a,.tilt-card,input,select').forEach(el=>{if(el.dataset.reticleBound)return;el.dataset.reticleBound='true';el.addEventListener('mouseenter',()=>{reticle.classList.add('active');if(el.closest('.risk-high,.risk-critical'))reticle.classList.add('risk');else if(el.closest('.risk-low'))reticle.classList.add('ok')});el.addEventListener('mouseleave',()=>reticle.classList.remove('active','risk','ok'))})}
+if(!isCoarse){let mx=0,my=0,cx=0,cy=0;window.addEventListener('mousemove',e=>{mx=e.clientX;my=e.clientY});function loop(){cx+=(mx-cx)*.22;cy+=(my-cy)*.22;reticle.style.transform=`translate(${cx}px,${cy}px)`;requestAnimationFrame(loop)}loop();bindReticle()}
+function bindCardTilt(){if(isCoarse||reduceMotion)return;grid.querySelectorAll('.tilt-card').forEach(card=>{if(card.dataset.tiltBound)return;card.dataset.tiltBound='true';card.addEventListener('mousemove',e=>{const r=card.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,rx=(y/r.height-.5)*-8,ry=(x/r.width-.5)*8;card.style.transform=`perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`});card.addEventListener('mouseleave',()=>{card.style.transform='perspective(900px) rotateX(0) rotateY(0) translateZ(0)'})})}
+bindCardTilt();
+const canvas=document.getElementById('emberCanvas'),ctx=canvas.getContext('2d');let w,h,embers=[];function resize(){w=canvas.width=window.innerWidth;h=canvas.height=window.innerHeight}resize();window.addEventListener('resize',resize);function makeEmber(){return{x:Math.random()*w,y:h+20,r:Math.random()*1.6+.4,sp:Math.random()*.5+.15,drift:(Math.random()-.5)*.4,a:Math.random()*.5+.2}}const count=reduceMotion?0:46;for(let i=0;i<count;i++)embers.push(makeEmber());function draw(){ctx.clearRect(0,0,w,h);embers.forEach(p=>{p.y-=p.sp;p.x+=p.drift;if(p.y<-20){Object.assign(p,makeEmber());p.y=h+10}ctx.beginPath();ctx.fillStyle=`rgba(255,138,61,${p.a})`;ctx.shadowColor='rgba(255,138,61,0.8)';ctx.shadowBlur=4;ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill()});if(count>0)requestAnimationFrame(draw)}draw();
+async function loadSessions(){const grid=document.getElementById('incident-grid'),resolvedList=document.getElementById('resolved-list');try{const resp=await fetch('/api/sessions');if(!resp.ok)throw new Error('HTTP '+resp.status);const sessions=await resp.json();if(!Array.isArray(sessions)||sessions.length===0){grid.innerHTML='<div class="empty-state">No active incidents. Start an investigation from the agent.</div>';rebindControls();return}const active=sessions.filter(s=>s.status!=='resolved'),resolved=sessions.filter(s=>s.status==='resolved');document.getElementById('stat-open').textContent=active.length;document.getElementById('stat-resolved').textContent=resolved.length;document.getElementById('resolved-count').textContent=resolved.length+' resolved';const riskScores=active.map(s=>{if(s.risk_score&&typeof s.risk_score==='object'){const raw=s.risk_score.score;if(raw===null||raw===undefined)return null;const n=Number(raw);return Number.isFinite(n)?n:null}if(s.risk_score!==null&&s.risk_score!==undefined){const n=Number(s.risk_score);return Number.isFinite(n)?n:null}return null}).filter(n=>n!==null);const avgRisk=riskScores.length>0?Math.round(riskScores.reduce((a,b)=>a+b,0)/riskScores.length):'--';document.getElementById('stat-risk').textContent=avgRisk;grid.innerHTML='';active.forEach(s=>{const card=document.createElement('div');card.className='tilt-card';card.dataset.id=s.incident_id||s.id;card.dataset.desc='';var riskScore=null,riskLevel='unknown';if(s.risk_score&&typeof s.risk_score==='object'){const raw=s.risk_score.score;if(raw!==null&&raw!==undefined){const n=Number(raw);riskScore=Number.isFinite(n)?n:null}riskLevel=(s.risk_score.level||'MEDIUM').toLowerCase()}else if(s.risk_score!==null&&s.risk_score!==undefined){const n=Number(s.risk_score);riskScore=Number.isFinite(n)?n:null;if(riskScore!==null)riskLevel=riskScore>=80?'critical':riskScore>=60?'high':riskScore>=30?'medium':'low'}var displayScore=riskScore,createdTs=s.created_at?new Date(s.created_at).getTime():0;card.dataset.risk=String(riskScore);card.dataset.created=String(createdTs);const eyebrow=document.createElement('div');eyebrow.className='eyebrow';eyebrow.textContent='Active Incident';const incId=document.createElement('div');incId.className='inc-id';incId.textContent=s.incident_id||s.id;const row=document.createElement('div');row.className='row';const badge=document.createElement('span');var hasAssessed=displayScore!==null;if(hasAssessed){badge.textContent=riskLevel.toUpperCase()+' '+displayScore;badge.className='risk-badge risk-'+riskLevel}else{badge.textContent=s.risk_score&&s.risk_score.level?s.risk_score.level.toUpperCase():'Unassessed';badge.className='risk-badge'}row.appendChild(badge);const btn=document.createElement('button');btn.className='btn btn-open';btn.textContent='Open Incident →';btn.addEventListener('click',function(){openIncident(s.incident_id||s.id)});card.appendChild(eyebrow);card.appendChild(incId);card.appendChild(row);card.appendChild(btn);grid.appendChild(card)});if(active.length===0)grid.innerHTML='<div class="empty-state">No active incidents.</div>';resolvedList.innerHTML='';resolved.forEach(s=>{const li=document.createElement('li'),span=document.createElement('span');span.className='id';span.textContent=s.incident_id||s.id;const status=document.createElement('span');status.className='status-resolved';status.textContent='RESOLVED';const reopen=document.createElement('button');reopen.className='reopen-btn';reopen.textContent='Reopen';reopen.addEventListener('click',function(){openIncident(s.incident_id||s.id)});li.appendChild(span);li.appendChild(status);li.appendChild(reopen);resolvedList.appendChild(li)});if(resolved.length===0)resolvedList.innerHTML='<li><span class="evidence-placeholder">No resolved incidents</span></li>';rebindControls()}catch(e){grid.innerHTML='<div class="empty-state">Backend not connected. Start an investigation from the agent.</div>'}}loadSessions();window.addEventListener('load',()=>toast('CyberForge dashboard loaded','info'));
 </script>
-
 </body>
 </html>
