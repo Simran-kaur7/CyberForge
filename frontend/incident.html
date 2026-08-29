@@ -519,6 +519,17 @@ PORT  4444</span>
           document.getElementById('approve-button').disabled = false;
           document.getElementById('reject-button').disabled = false;
         }
+        // Show the persisted decision result for resolved sessions
+        if (match.status === 'resolved' && approvalDecision) {
+          var resultEl = document.getElementById('decision-result');
+          if (approvalDecision === 'approved') {
+            resultEl.className = 'decision-result approved';
+            resultEl.textContent = 'Approved — containment was executed.';
+          } else if (approvalDecision === 'rejected') {
+            resultEl.className = 'decision-result rejected';
+            resultEl.textContent = 'Rejected — no containment action was taken.';
+          }
+        }
         document.getElementById('copy-button').disabled = false;
 
         if (!canContain) {
@@ -605,24 +616,24 @@ PORT  4444</span>
   //  TIMELINE PROGRESSION AFTER DECISION
   // ============================================================
   function animateDecisionTimeline(decision) {
-    // Mark Human Approval as completed
+    // Step 5 = Human Approval (marked completed)
     renderTimeline(5);
     if (decision === 'approve') {
-      // Approved: animate Containment executing, then complete
+      // Approved: Containment actively executes the block_ip workflow.
+      // Do NOT mark containment complete until the actual operation
+      // finishes; showing it as active communicates the ongoing work.
       setTimeout(function () {
-        renderTimeline(6);
-        setTimeout(function () {
-          renderTimeline(TIMELINE_STEPS.length);
-        }, 1500);
-      }, 1200);
-    } else {
-      // Rejected: Containment skipped, proceed to Post-Incident Summary
-      setTimeout(function () {
-        renderTimeline(6);
-        setTimeout(function () {
-          renderTimeline(TIMELINE_STEPS.length);
-        }, 800);
+        renderTimeline(5); // containment is active (step 5)
       }, 600);
+    } else {
+      // Rejected: Containment is skipped (not executed).
+      // Mark it done (no action taken), then show Post-Incident Summary.
+      setTimeout(function () {
+        renderTimeline(6); // containment done (skipped), post-incident active
+      }, 400);
+      setTimeout(function () {
+        renderTimeline(TIMELINE_STEPS.length); // all done
+      }, 1200);
     }
   }
 
@@ -1063,15 +1074,21 @@ PORT  4444</span>
         // Render evidence
         renderEvidence(investigationData);
 
-        // Render timeline based on persisted investigation_status.
-        // TIMELINE_STEPS indices: 0=root-agent, 1=log, 2=network,
-        // 3=risk-engine, 4=human-gate.
-        // All investigation steps complete means the human-gate
-        // step (4) is the active/next step; partial investigations
-        // stop at whichever tool stage last ran.
-        if (match.status === 'resolved') {
-          // All investigation + approval + containment stages completed
+        // Render timeline based on persisted investigation_status AND
+        // the actual approval decision.  'resolved' alone does not
+        // tell us which stages completed — a rejected session is also
+        // resolved but containment was never executed.
+        var approvalDecision = null;
+        var ap = match.approval_state;
+        if (ap && typeof ap.status === 'string') {
+          approvalDecision = ap.status;
+        }
+        if (match.status === 'resolved' && approvalDecision === 'approved') {
+          // Approved resolution: all stages including containment completed
           renderTimeline(TIMELINE_STEPS.length);
+        } else if (match.status === 'resolved' && approvalDecision === 'rejected') {
+          // Rejected resolution: containment was skipped, post-incident ran
+          renderTimeline(4); // up to human gate
         } else if (investigationStatus === 'complete') {
           renderTimeline(4);
         } else if (investigationStatus === 'partial') {
@@ -1084,9 +1101,13 @@ PORT  4444</span>
         // 1. The session lifecycle is still active (not already resolved)
         // 2. The investigation is complete
         // 3. Containment is allowed by the agent
+        // 4. No terminal decision has been made yet
         var sessionActive = match.status !== 'resolved';
+        var decisionPending = !approvalDecision
+          || approvalDecision === 'pending';
         if (
           sessionActive
+          && decisionPending
           && investigationData.containment_allowed
           && investigationData.session_id
         ) {

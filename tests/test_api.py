@@ -2323,6 +2323,78 @@ def run_all():
             assert sess["status"] == "active"
         with_temp_sessions(body)
     check("test_reinvestigation_reactivates_resolved_session", t116)
+    # 117: Approved session has approval_state.status = approved (for timeline rendering).
+    def t117():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-TL-APPROVED-STATE")
+            sdk_client.update_session(s["id"], target_ip="10.0.0.25",
+                                      investigation_status="complete")
+            sdk_client.request_approval(s["id"], "block_ip",
+                                        {"incident_id": "INC-TL-APPROVED-STATE"})
+            sess = sdk_client.get_session(s["id"])
+            aid = sess["approval_state"]["action_id"]
+            prep = sdk_client.prepare_decision(s["id"], aid, "approved", "analyst")
+            sdk_client.complete_decision(s["id"], aid, prep["token"])
+            sess = sdk_client.get_session(s["id"])
+            assert sess["approval_state"]["status"] == "approved"
+            assert sess["approval_state"].get("decided_at") is not None
+        with_temp_sessions(body)
+    check("test_approved_session_approval_state_has_decision", t117)
+
+    # 118: Rejected session has approval_state.status = rejected.
+    def t118():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-TL-REJECTED-STATE")
+            sdk_client.update_session(s["id"], target_ip="10.0.0.25",
+                                      investigation_status="complete")
+            sdk_client.request_approval(s["id"], "block_ip",
+                                        {"incident_id": "INC-TL-REJECTED-STATE"})
+            sess = sdk_client.get_session(s["id"])
+            aid = sess["approval_state"]["action_id"]
+            prep = sdk_client.prepare_decision(s["id"], aid, "rejected", "analyst")
+            sdk_client.complete_decision(s["id"], aid, prep["token"])
+            sess = sdk_client.get_session(s["id"])
+            assert sess["approval_state"]["status"] == "rejected"
+        with_temp_sessions(body)
+    check("test_rejected_session_approval_state_has_decision", t118)
+
+    # 119: list_sessions exposes approval_state for frontend timeline logic.
+    def t119():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-TL-LIST-APPROVAL")
+            sdk_client.update_session(s["id"], target_ip="10.0.0.25",
+                                      investigation_status="complete")
+            sdk_client.request_approval(s["id"], "block_ip",
+                                        {"incident_id": "INC-TL-LIST-APPROVAL"})
+            sess = sdk_client.get_session(s["id"])
+            aid = sess["approval_state"]["action_id"]
+            prep = sdk_client.prepare_decision(s["id"], aid, "approved", "analyst")
+            sdk_client.complete_decision(s["id"], aid, prep["token"])
+            sessions = sdk_client.list_sessions()
+            match = [s for s in sessions if s["incident_id"] == "INC-TL-LIST-APPROVAL"]
+            assert len(match) == 1
+            ap = match[0].get("approval_state")
+            assert ap is not None
+            assert ap.get("status") == "approved"
+        with_temp_sessions(body)
+    check("test_list_sessions_includes_approval_state_for_timeline", t119)
+
+    # 120: Pending approval has no decided_at, session still active.
+    def t120():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-TL-PENDING-STATE")
+            sdk_client.update_session(s["id"], target_ip="10.0.0.25",
+                                      investigation_status="complete")
+            sdk_client.request_approval(s["id"], "block_ip",
+                                        {"incident_id": "INC-TL-PENDING-STATE"})
+            sess = sdk_client.get_session(s["id"])
+            ap = sess.get("approval_state", {})
+            assert ap.get("status") == "pending"
+            assert ap.get("decided_at") is None
+            assert sess["status"] == "active"
+        with_temp_sessions(body)
+    check("test_pending_approval_has_no_decision", t120)
+
 
 
     print(f"\n{'=' * 50}")
