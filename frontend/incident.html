@@ -304,7 +304,9 @@ PORT  4444</span>
     { id: 'sub-log',      title: 'Log-Analysis Sub',   desc: 'Correlating auth logs + evidence' },
     { id: 'sub-net',      title: 'Network Sub',        desc: 'Checking system activity + network' },
     { id: 'risk-engine',  title: 'Risk Engine',        desc: 'Running risk_score.py in sandbox' },
-    { id: 'human-gate',   title: 'Human Approval',     desc: 'Awaiting analyst decision' }
+    { id: 'human-gate',   title: 'Human Approval',     desc: 'Awaiting analyst decision' },
+    { id: 'containment',  title: 'Containment',        desc: 'Executing containment workflow' },
+    { id: 'post-incident',title: 'Post-Incident Summary', desc: 'Generating final incident summary' }
   ];
 
   function renderTimeline(activeIndex) {
@@ -599,6 +601,31 @@ PORT  4444</span>
     toast(retryable ? 'Please retry: ' + message : 'Decision failed: ' + message, 'error');
   }
 
+  // ============================================================
+  //  TIMELINE PROGRESSION AFTER DECISION
+  // ============================================================
+  function animateDecisionTimeline(decision) {
+    // Mark Human Approval as completed
+    renderTimeline(5);
+    if (decision === 'approve') {
+      // Approved: animate Containment executing, then complete
+      setTimeout(function () {
+        renderTimeline(6);
+        setTimeout(function () {
+          renderTimeline(TIMELINE_STEPS.length);
+        }, 1500);
+      }, 1200);
+    } else {
+      // Rejected: Containment skipped, proceed to Post-Incident Summary
+      setTimeout(function () {
+        renderTimeline(6);
+        setTimeout(function () {
+          renderTimeline(TIMELINE_STEPS.length);
+        }, 800);
+      }, 600);
+    }
+  }
+
   function sendDecision(decision) {
     var btn = decision === 'approve' ? document.getElementById('approve-button') : document.getElementById('reject-button');
     btn.disabled = true;
@@ -686,6 +713,7 @@ PORT  4444</span>
         pendingToolCallId = null;
         document.getElementById('approve-button').disabled = true;
         document.getElementById('reject-button').disabled = true;
+        animateDecisionTimeline(decision);
       });
     })
     .catch(function (err) {
@@ -1041,7 +1069,10 @@ PORT  4444</span>
         // All investigation steps complete means the human-gate
         // step (4) is the active/next step; partial investigations
         // stop at whichever tool stage last ran.
-        if (investigationStatus === 'complete') {
+        if (match.status === 'resolved') {
+          // All investigation + approval + containment stages completed
+          renderTimeline(TIMELINE_STEPS.length);
+        } else if (investigationStatus === 'complete') {
           renderTimeline(4);
         } else if (investigationStatus === 'partial') {
           renderTimeline(3);

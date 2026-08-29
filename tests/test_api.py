@@ -2242,6 +2242,89 @@ def run_all():
         with_temp_sessions(body)
     check("test_definite_pre_dispatch_failure_remains_retryable", t113)
 
+    # 114: After approve, session status = resolved and action = approved.
+    # The frontend timeline uses session.status === 'resolved' to render
+    # all stages as completed.
+    def t114():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-TL-APPROVE")
+            sdk_client.update_session(s["id"], target_ip="10.0.0.25",
+                                      investigation_status="complete")
+            sdk_client.request_approval(s["id"], "block_ip",
+                                        {"incident_id": "INC-TL-APPROVE"})
+            sess = sdk_client.get_session(s["id"])
+            ap = sess["approval_state"]
+            assert sess["status"] == "active"
+            assert ap["status"] == "pending"
+
+            aid = ap["action_id"]
+            prep = sdk_client.prepare_decision(s["id"], aid, "approved", "analyst")
+            assert prep["success"] is True
+            token = prep["token"]
+
+            result = sdk_client.complete_decision(s["id"], aid, token)
+            assert result["success"] is True
+            assert result["status"] == "approved"
+
+            sess = sdk_client.get_session(s["id"])
+            assert sess["status"] == "resolved"
+            assert sess["approval_state"]["status"] == "approved"
+            assert sess["approval_state"]["decided_at"] is not None
+        with_temp_sessions(body)
+    check("test_approve_resolves_session", t114)
+
+    # 115: After reject, session status = resolved and action = rejected.
+    def t115():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-TL-REJECT")
+            sdk_client.update_session(s["id"], target_ip="10.0.0.25",
+                                      investigation_status="complete")
+            sdk_client.request_approval(s["id"], "block_ip",
+                                        {"incident_id": "INC-TL-REJECT"})
+            sess = sdk_client.get_session(s["id"])
+            aid = sess["approval_state"]["action_id"]
+
+            prep = sdk_client.prepare_decision(s["id"], aid, "rejected", "analyst")
+            assert prep["success"] is True
+            token = prep["token"]
+
+            result = sdk_client.complete_decision(s["id"], aid, token)
+            assert result["success"] is True
+            assert result["status"] == "rejected"
+
+            sess = sdk_client.get_session(s["id"])
+            assert sess["status"] == "resolved"
+            assert sess["approval_state"]["status"] == "rejected"
+        with_temp_sessions(body)
+    check("test_reject_resolves_session", t115)
+
+    # 116: Reinvestigation of a resolved session reactivates it to active.
+    def t116():
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-TL-REACTIVATE")
+            sdk_client.update_session(s["id"], target_ip="10.0.0.25",
+                                      investigation_status="complete")
+            sdk_client.request_approval(s["id"], "block_ip",
+                                        {"incident_id": "INC-TL-REACTIVATE"})
+            sess = sdk_client.get_session(s["id"])
+            aid = sess["approval_state"]["action_id"]
+
+            prep = sdk_client.prepare_decision(s["id"], aid, "approved", "analyst")
+            sdk_client.complete_decision(s["id"], aid, prep["token"])
+
+            sess = sdk_client.get_session(s["id"])
+            assert sess["status"] == "resolved"
+
+            sdk_client.update_session(s["id"],
+                                      target_ip="10.0.0.25",
+                                      investigation_status="complete",
+                                      supersede_stale_approval=True)
+            sess = sdk_client.get_session(s["id"])
+            assert sess["status"] == "active"
+        with_temp_sessions(body)
+    check("test_reinvestigation_reactivates_resolved_session", t116)
+
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:
