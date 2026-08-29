@@ -948,12 +948,12 @@
         // Add correlated findings as evidence too
         findings.forEach(function(f) { evidenceLines.push(f); });
 
-        // Determine tools_used from which results are present
-        var toolsUsed = [];
-        if (authLogs && authLogs.success !== false) toolsUsed.push('search_security_logs');
-        if (sysActivity && sysActivity.success !== false) toolsUsed.push('check_system_activity');
-        if (corrAnalysis && corrAnalysis.success !== false) toolsUsed.push('analyze_evidence');
-        if (riskScore && riskScore.score !== null) toolsUsed.push('risk_score');
+        // Use the authoritative tools_used list persisted by the agent.
+        // Never guess from snapshot contents — missing or sanitized results
+        // with success !== false would falsely inflate the tool count.
+        var toolsUsed = (match.tools_used && Array.isArray(match.tools_used))
+          ? match.tools_used.slice()
+          : [];
 
         // Determine severity from risk score
         var severity = 'UNKNOWN';
