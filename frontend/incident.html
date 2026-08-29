@@ -990,7 +990,7 @@
         if (match.target_ip && match.target_ip !== 'unknown') {
           document.getElementById('stat-source').textContent = match.target_ip;
         }
-        if (match.target_ip) {
+        if (match.target_ip && match.target_ip !== 'unknown') {
           document.getElementById('target-input').value = match.target_ip;
         }
         if (toolsUsed.length) {
