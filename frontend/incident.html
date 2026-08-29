@@ -880,9 +880,165 @@
   document.getElementById('copy-button').addEventListener('click', copyAudit);
 
   // ============================================================
+  //  LOAD EXISTING SESSION DATA ON PAGE LOAD
+  // ============================================================
+  function loadExistingSession() {
+    return fetch(API_BASE + '/api/sessions')
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (sessions) {
+        if (!Array.isArray(sessions)) return;
+        // Find the newest session matching this incident ID
+        var match = null;
+        for (var i = 0; i < sessions.length; i++) {
+          var s = sessions[i];
+          if (s.incident_id === incidentId || s.id === incidentId) {
+            if (!match || (s.created_at || '') > (match.created_at || '')) {
+              match = s;
+            }
+          }
+        }
+        if (!match) return;
+
+        // Populate session state
+        sessionId = match.id;
+        trueforgeSessionId = match.trueforge_session_id || null;
+
+        // Build a reconstructed investigationData from the persisted session
+        var evSnap = match.evidence_snapshot || {};
+        var riskScore = match.risk_score;
+        var investigationStatus = match.investigation_status || 'unknown';
+
+        // Determine evidence_complete from the persisted investigation_status
+        var evidenceComplete = investigationStatus === 'complete';
+
+        // Flatten tool_results into evidence lines for display
+        var evidenceLines = [];
+        var findings = [];
+        var authLogs = evSnap.authentication_logs || {};
+        var sysActivity = evSnap.system_activity || {};
+        var corrAnalysis = evSnap.correlated_analysis || {};
+
+        if (corrAnalysis.findings && Array.isArray(corrAnalysis.findings)) {
+          findings = corrAnalysis.findings;
+        }
+        // Build evidence from authentication logs
+        var failedLogins = authLogs.failed_logins || 0;
+        if (failedLogins > 0) {
+          evidenceLines.push(failedLogins + ' failed SSH login attempts' + (match.target_ip ? ' from ' + match.target_ip : ''));
+        }
+        var successLogins = authLogs.successful_logins || 0;
+        if (successLogins > 0) {
+          evidenceLines.push(successLogins + ' successful login(s) after failures');
+        }
+        // Build evidence from system activity
+        var suspProc = sysActivity.suspicious_process_count || 0;
+        if (suspProc > 0) {
+          var procs = (sysActivity.suspicious_processes || []).slice(0, 3).map(function(p) {
+            return (p && p.command) || 'unknown';
+          });
+          evidenceLines.push('Suspicious processes detected: ' + procs.join(', '));
+        }
+        var unusualConn = sysActivity.unusual_connection_count || 0;
+        if (unusualConn > 0) {
+          evidenceLines.push('Unusual network connections: ' + unusualConn + ' connection(s) to non-standard ports');
+        }
+        // Add correlated findings as evidence too
+        findings.forEach(function(f) { evidenceLines.push(f); });
+
+        // Use the authoritative tools_used list persisted by the agent.
+        // Never guess from snapshot contents — missing or sanitized results
+        // with success !== false would falsely inflate the tool count.
+        var toolsUsed = (match.tools_used && Array.isArray(match.tools_used))
+          ? match.tools_used.slice()
+          : [];
+
+        // Determine severity from risk score
+        var severity = 'UNKNOWN';
+        if (riskScore && riskScore.level) severity = riskScore.level;
+
+        investigationData = {
+          success: investigationStatus !== 'error',
+          status: investigationStatus,
+          evidence_complete: evidenceComplete,
+          session_id: match.id,
+          target_ip: match.target_ip || 'unknown',
+          severity: severity,
+          query: match.query || '',
+          risk_score: riskScore,
+          findings: findings,
+          evidence: evidenceLines,
+          tools_used: toolsUsed,
+          recommendation: '',
+          containment_allowed: evidenceComplete && riskScore && riskScore.score !== null,
+        };
+
+        // Render the UI from the reconstructed data
+        if (match.target_ip && match.target_ip !== 'unknown') {
+          document.getElementById('stat-source').textContent = match.target_ip;
+        }
+        if (match.target_ip) {
+          document.getElementById('target-input').value = match.target_ip;
+        }
+        if (toolsUsed.length) {
+          document.getElementById('stat-subagents').textContent = toolsUsed.length;
+        }
+        document.getElementById('incident-desc').textContent =
+          (match.query || 'Investigation') + ' \u00b7 ' + severity + ' severity';
+
+        // Render risk gauge
+        var score = null;
+        if (riskScore && typeof riskScore.score === 'number' && isFinite(riskScore.score)) {
+          score = riskScore.score;
+        }
+        updateGauge(score !== null ? score : 0, score === null);
+        renderExplain(investigationData, score !== null ? score : 0);
+
+        // Render evidence
+        renderEvidence(investigationData);
+
+        // Render timeline based on persisted investigation_status.
+        // TIMELINE_STEPS indices: 0=root-agent, 1=log, 2=network,
+        // 3=risk-engine, 4=human-gate.
+        // All investigation steps complete means the human-gate
+        // step (4) is the active/next step; partial investigations
+        // stop at whichever tool stage last ran.
+        if (investigationStatus === 'complete') {
+          renderTimeline(4);
+        } else if (investigationStatus === 'partial') {
+          renderTimeline(3);
+        } else {
+          renderTimeline(0);
+        }
+
+        // Enable approve/reject ONLY when:
+        // 1. The session lifecycle is still active (not already resolved)
+        // 2. The investigation is complete
+        // 3. Containment is allowed by the agent
+        var sessionActive = match.status !== 'resolved';
+        if (
+          sessionActive
+          && investigationData.containment_allowed
+          && investigationData.session_id
+        ) {
+          document.getElementById('approve-button').disabled = false;
+          document.getElementById('reject-button').disabled = false;
+        }
+        document.getElementById('copy-button').disabled = false;
+      })
+      .catch(function () {
+        // Silently ignore -- page works without preloaded data
+      });
+  }
+
+  // ============================================================
   //  INIT
   // ============================================================
-  loadPrevious();
+  loadExistingSession().then(function () {
+    loadPrevious();
+  });
   bindReticle();
 </script>
 

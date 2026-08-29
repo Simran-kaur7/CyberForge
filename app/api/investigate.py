@@ -169,6 +169,7 @@ def investigate(body: InvestigationRequest):
     resolved_target = result.get("target_ip") or "unknown"
     evidence_snapshot = result.get("tool_results", {})
     risk_score = result.get("risk_score")
+    tools_used = result.get("tools_used", [])
 
     if incident_id:
         session_incident_id = incident_id
@@ -188,6 +189,8 @@ def investigate(body: InvestigationRequest):
                 risk_score=risk_score,
                 target_ip=resolved_target,
                 query=query,
+                investigation_status=result.get("status", "partial"),
+                tools_used=tools_used,
                 # Reusing this session means its evidence/risk are being
                 # replaced. Any approval still pending was requested against the
                 # previous investigation and is bound to that run's TrueForge
@@ -217,6 +220,8 @@ def investigate(body: InvestigationRequest):
                 risk_score=risk_score,
                 target_ip=resolved_target,
                 query=query,
+                investigation_status=result.get("status", "partial"),
+                tools_used=tools_used,
             )
             local_session_id = local_session["id"]
     except HTTPException:

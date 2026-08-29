@@ -325,6 +325,11 @@ def list_sessions() -> list:
             "risk_score": s.get("risk_score"),
             "approval_state": s.get("approval_state"),
             "trueforge_session_id": s.get("trueforge_session_id"),
+            "evidence_snapshot": s.get("evidence_snapshot"),
+            "investigation_status": s.get("investigation_status"),
+            "target_ip": s.get("target_ip"),
+            "query": s.get("query"),
+            "tools_used": s.get("tools_used"),
         }
         for s in _read_sessions()
     ]
@@ -668,6 +673,12 @@ def complete_decision(sid: str, aid: str, token: str) -> dict:
                     action.pop("decision_in_progress", None)
                     action.pop("forward_error", None)
                     break
+
+            # Resolve the incident lifecycle.  Both approved (contained)
+            # and rejected (false-alarm) represent terminal analyst
+            # decisions — the incident is no longer active.
+            if s.get("status") != "resolved":
+                s["status"] = "resolved"
 
             s["updated_at"] = now
             return {
@@ -1083,6 +1094,11 @@ def update_session(sid: str, *, supersede_stale_approval: bool = False, **kw) ->
                     if supersede_stale_approval
                     else None
                 )
+                # A reinvestigation reuses a resolved session: restore
+                # it to active so the dashboard shows it under Active
+                # and the incident page can initiate another approval.
+                if supersede_stale_approval and s.get("status") == "resolved":
+                    s["status"] = "active"
                 s["updated_at"] = datetime.now(timezone.utc).isoformat()
                 result = {"success": True, "session": s}
                 if superseded_action_id:
