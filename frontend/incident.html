@@ -72,7 +72,7 @@ PORT  4444</span>
       <p style="font-family:var(--font-mono);font-size:12.5px;color:var(--ink-dim);margin:0 0 18px;">
         Dispatch the root agent to correlate evidence across subagents before any response action is proposed.
       </p>
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:0;">
+      <div id="investigate-controls" style="display:flex;gap:10px;align-items:center;margin-bottom:0;">
         <input type="text" id="target-input" class="search-input" placeholder="Target IP (auto-resolved for known incidents)" style="flex:1;min-width:0;">
         <button id="investigate-button" class="investigate-btn">Investigate</button>
       </div>
@@ -154,14 +154,7 @@ PORT  4444</span>
   // Known incident-to-target mappings for the demo dataset.
   // Auto-populates the target input so the analyst does not need to
   // manually enter the IP for a known incident.
-  const INCIDENT_TARGET_MAP = {
-    'INC-1024': '10.0.0.25',
-    'INC-DAY5-E2E': '10.0.0.25',
-  };
-  const autoTarget = INCIDENT_TARGET_MAP[incidentId];
-  if (autoTarget) {
-    document.getElementById('target-input').value = autoTarget;
-  }
+  // Target IP must be entered manually by the analyst.
 
   // ============================================================
   //  TOASTS
@@ -304,14 +297,24 @@ PORT  4444</span>
     { id: 'sub-log',      title: 'Log-Analysis Sub',   desc: 'Correlating auth logs + evidence' },
     { id: 'sub-net',      title: 'Network Sub',        desc: 'Checking system activity + network' },
     { id: 'risk-engine',  title: 'Risk Engine',        desc: 'Running risk_score.py in sandbox' },
-    { id: 'human-gate',   title: 'Human Approval',     desc: 'Awaiting analyst decision' }
+    { id: 'human-gate',   title: 'Human Approval',     desc: 'Awaiting analyst decision' },
+    { id: 'containment',  title: 'Containment',        desc: 'Executing containment workflow' },
+    { id: 'post-incident',title: 'Post-Incident Summary', desc: 'Generating final incident summary' }
   ];
 
-  function renderTimeline(activeIndex) {
+  function renderTimeline(activeIndex, skippedSteps) {
     var el = document.getElementById('timeline');
     el.innerHTML = '';
+    var skipped = skippedSteps || [];
     TIMELINE_STEPS.forEach(function (step, i) {
-      var cls = i < activeIndex ? 'done' : i === activeIndex ? 'active' : '';
+      var cls;
+      if (i < activeIndex) {
+        cls = skipped.indexOf(i) !== -1 ? 'skipped' : 'done';
+      } else if (i === activeIndex) {
+        cls = 'active';
+      } else {
+        cls = '';
+      }
       var li = document.createElement('li');
       li.className = cls;
       li.innerHTML = '<div class="t-title">' + step.title + '</div><div class="t-desc">' + step.desc + '</div>';
@@ -599,7 +602,38 @@ PORT  4444</span>
     toast(retryable ? 'Please retry: ' + message : 'Decision failed: ' + message, 'error');
   }
 
+  // ============================================================
+  //  TIMELINE PROGRESSION AFTER DECISION
+  // ============================================================
+  function animateDecisionTimeline(decision) {
+    // Step 5 = Human Approval (marked completed)
+    renderTimeline(5);
+    if (decision === 'approve') {
+      // Approved: Containment actively executes the block_ip workflow,
+      // then Post-Incident Summary runs, then all complete.
+      setTimeout(function () {
+        renderTimeline(5); // containment active
+      }, 600);
+      setTimeout(function () {
+        renderTimeline(6); // containment done, post-incident active
+      }, 1800);
+      setTimeout(function () {
+        renderTimeline(TIMELINE_STEPS.length); // all done
+      }, 2800);
+    } else {
+      // Rejected: Containment is skipped (not executed).
+      // Show containment as skipped, then Post-Incident Summary complete.
+      setTimeout(function () {
+        renderTimeline(6, [5]); // step 5 (containment) shown as skipped
+      }, 400);
+      setTimeout(function () {
+        renderTimeline(TIMELINE_STEPS.length, [5]); // all done, containment skipped
+      }, 1200);
+    }
+  }
+
   function sendDecision(decision) {
+
     var btn = decision === 'approve' ? document.getElementById('approve-button') : document.getElementById('reject-button');
     btn.disabled = true;
     btn.textContent = decision === 'approve' ? 'Approving\u2026' : 'Rejecting\u2026';
@@ -686,6 +720,7 @@ PORT  4444</span>
         pendingToolCallId = null;
         document.getElementById('approve-button').disabled = true;
         document.getElementById('reject-button').disabled = true;
+        animateDecisionTimeline(decision);
       });
     })
     .catch(function (err) {
@@ -928,14 +963,22 @@ PORT  4444</span>
         // complete session, which could belong to a different target
         // or represent stale evidence.
         var match = null;
+        var resolvedMatch = null;
         for (var i = 0; i < sessions.length; i++) {
           var s = sessions[i];
           if (s.incident_id === incidentId || s.id === incidentId) {
-            if (!match || (s.created_at || '') > (match.created_at || '')) {
-              match = s;
+            if (s.status === 'resolved') {
+              if (!resolvedMatch || (s.created_at || '') > (resolvedMatch.created_at || '')) {
+                resolvedMatch = s;
+              }
+            } else {
+              if (!match || (s.created_at || '') > (match.created_at || '')) {
+                match = s;
+              }
             }
           }
         }
+        if (resolvedMatch) match = resolvedMatch;
         if (!match) return;
 
         // Populate session state
@@ -1015,9 +1058,7 @@ PORT  4444</span>
         if (match.target_ip && match.target_ip !== 'unknown') {
           document.getElementById('stat-source').textContent = match.target_ip;
         }
-        if (match.target_ip && match.target_ip !== 'unknown') {
-          document.getElementById('target-input').value = match.target_ip;
-        }
+        // Target IP input left empty for analyst to enter manually.
         if (toolsUsed.length) {
           document.getElementById('stat-subagents').textContent = toolsUsed.length;
         }
@@ -1035,18 +1076,33 @@ PORT  4444</span>
         // Render evidence
         renderEvidence(investigationData);
 
-        // Render timeline based on persisted investigation_status.
-        // TIMELINE_STEPS indices: 0=root-agent, 1=log, 2=network,
-        // 3=risk-engine, 4=human-gate.
-        // All investigation steps complete means the human-gate
-        // step (4) is the active/next step; partial investigations
-        // stop at whichever tool stage last ran.
-        if (investigationStatus === 'complete') {
+        // Render timeline based on persisted investigation_status AND
+        // the actual approval decision.  'resolved' alone does not
+        // tell us which stages completed - a rejected session is also
+        // resolved but containment was never executed.
+        var approvalDecision = null;
+        var ap = match.approval_state;
+        if (ap && typeof ap.status === 'string') {
+          approvalDecision = ap.status;
+        }
+        if (match.status === 'resolved' && approvalDecision === 'approved') {
+          // Approved resolution: all stages including containment completed
+          renderTimeline(TIMELINE_STEPS.length);
+        } else if (match.status === 'resolved' && approvalDecision === 'rejected') {
+          // Rejected resolution: containment was skipped
+          renderTimeline(TIMELINE_STEPS.length, [5]);
+        } else if (investigationStatus === 'complete') {
           renderTimeline(4);
         } else if (investigationStatus === 'partial') {
           renderTimeline(3);
         } else {
           renderTimeline(0);
+        }
+
+        // Hide investigate controls for resolved sessions
+        if (match.status === 'resolved') {
+          var ic = document.getElementById('investigate-controls');
+          if (ic) ic.style.display = 'none';
         }
 
         // Enable approve/reject ONLY when:
