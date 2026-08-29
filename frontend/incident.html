@@ -72,7 +72,7 @@ PORT  4444</span>
         Dispatch the root agent to correlate evidence across subagents before any response action is proposed.
       </p>
       <div style="display:flex;gap:10px;align-items:center;margin-bottom:0;">
-        <input type="text" id="target-input" class="search-input" placeholder="Enter target IP (e.g. 10.0.0.25) or leave empty for full analysis" style="flex:1;min-width:0;">
+        <input type="text" id="target-input" class="search-input" placeholder="Target IP (auto-resolved for known incidents)" style="flex:1;min-width:0;">
         <button id="investigate-button" class="investigate-btn">Investigate</button>
       </div>
     </div>
@@ -149,6 +149,17 @@ PORT  4444</span>
   const incidentId = params.get('id') || 'INC-1024';
   document.getElementById('incident-id').textContent = incidentId;
   document.getElementById('breadcrumb-id').textContent = incidentId;
+
+  // Known incident-to-target mappings for the demo dataset.
+  // Auto-populates the target input so the analyst does not need to
+  // manually enter the IP for a known incident.
+  const INCIDENT_TARGET_MAP = {
+    'INC-1024': '10.0.0.25',
+  };
+  const autoTarget = INCIDENT_TARGET_MAP[incidentId];
+  if (autoTarget) {
+    document.getElementById('target-input').value = autoTarget;
+  }
 
   // ============================================================
   //  TOASTS
@@ -995,7 +1006,7 @@ PORT  4444</span>
         if (match.target_ip && match.target_ip !== 'unknown') {
           document.getElementById('stat-source').textContent = match.target_ip;
         }
-        if (match.target_ip) {
+        if (match.target_ip && match.target_ip !== 'unknown') {
           document.getElementById('target-input').value = match.target_ip;
         }
         if (toolsUsed.length) {
