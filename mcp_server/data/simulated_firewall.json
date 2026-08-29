@@ -1,19 +1,4 @@
 {
-  "blocked_ips": [
-    "10.0.0.25"
-  ],
-  "events": [
-    {
-      "timestamp": "2026-08-24T17:20:51.683830+00:00",
-      "action": "BLOCK_IP",
-      "ip": "10.0.0.25",
-      "mode": "SIMULATED"
-    },
-    {
-      "timestamp": "2026-08-27T05:28:05.562885+00:00",
-      "action": "BLOCK_IP",
-      "ip": "10.0.0.25",
-      "mode": "SIMULATED"
-    }
-  ]
+  "blocked_ips": [],
+  "events": []
 }
