@@ -311,3 +311,26 @@ def investigate_incident(incident_id: str):
         "authentication": logs,
         "system_activity": activity,
     }
+
+
+from pathlib import Path
+
+FIREWALL_FILE = Path(__file__).resolve().parent.parent.parent / 'mcp_server' / 'data' / 'simulated_firewall.json'
+
+
+@router.get('/firewall')
+def get_firewall_status():
+    """Return the current simulated firewall state."""
+    if not FIREWALL_FILE.exists():
+        return {'blocked_ips': [], 'events': []}
+    try:
+        data = json.loads(FIREWALL_FILE.read_text(encoding='utf-8'))
+        # Only return safe fields
+        blocked = data.get('blocked_ips', [])
+        events = data.get('events', [])
+        return {
+            'blocked_ips': blocked if isinstance(blocked, list) else [],
+            'events': events if isinstance(events, list) else [],
+        }
+    except (json.JSONDecodeError, OSError):
+        return {'blocked_ips': [], 'events': []}

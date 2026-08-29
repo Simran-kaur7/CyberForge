@@ -60,6 +60,7 @@ PORT  4444</span>
   <div class="stat-block"><div class="stat-label">Affected Host</div><div class="stat-block-value" id="stat-host">&mdash;</div></div>
   <div class="stat-block"><div class="stat-label">First Seen</div><div class="stat-block-value" id="stat-seen">&mdash;</div></div>
   <div class="stat-block"><div class="stat-label">Subagents Engaged</div><div class="stat-block-value" id="stat-subagents">2</div></div>
+  <div class="stat-block"><div class="stat-label">Firewall</div><div class="stat-block-value" id="stat-firewall">--</div></div>
 </div>
 
 <main class="incident-main" id="main-content">
@@ -155,6 +156,7 @@ PORT  4444</span>
   // manually enter the IP for a known incident.
   const INCIDENT_TARGET_MAP = {
     'INC-1024': '10.0.0.25',
+    'INC-DAY5-E2E': '10.0.0.25',
   };
   const autoTarget = INCIDENT_TARGET_MAP[incidentId];
   if (autoTarget) {
@@ -529,6 +531,9 @@ PORT  4444</span>
         }
 
         toast('Investigation complete.', 'success');
+        // Refresh firewall status for the investigated target
+        var fwTarget = investigationData.target_ip !== 'unknown' ? investigationData.target_ip : null;
+        loadFirewallStatus(fwTarget);
         investigationInProgress = false;
         btn.disabled = false;
         btn.textContent = 'Investigate Incident';
@@ -917,16 +922,22 @@ PORT  4444</span>
       })
       .then(function (sessions) {
         if (!Array.isArray(sessions)) return;
-        // Find the newest session matching this incident ID
+        // Find the best session matching this incident ID.
+        // Prefer the newest complete session; fall back to the newest.
         var match = null;
+        var matchComplete = null;
         for (var i = 0; i < sessions.length; i++) {
           var s = sessions[i];
           if (s.incident_id === incidentId || s.id === incidentId) {
-            if (!match || (s.created_at || '') > (match.created_at || '')) {
-              match = s;
+            var isNewer = !match || (s.created_at || '') > (match.created_at || '');
+            if (isNewer) match = s;
+            var isComplete = s.investigation_status === 'complete';
+            if (isComplete && (!matchComplete || (s.created_at || '') > (matchComplete.created_at || ''))) {
+              matchComplete = s;
             }
           }
         }
+        if (matchComplete) match = matchComplete;
         if (!match) return;
 
         // Populate session state
@@ -1061,10 +1072,44 @@ PORT  4444</span>
   }
 
   // ============================================================
+  //  FIREWALL STATUS
+  // ============================================================
+  function loadFirewallStatus(targetIp) {
+    fetch(API_BASE + '/api/firewall')
+      .then(function (r) { return r.json(); })
+      .then(function (fw) {
+        var el = document.getElementById('stat-firewall');
+        if (!el) return;
+        var blocked = (fw.blocked_ips || []);
+        if (targetIp && blocked.indexOf(targetIp) !== -1) {
+          el.textContent = 'BLOCKED';
+          el.style.color = '#ff4d4d';
+        } else if (blocked.length > 0) {
+          el.textContent = blocked.length + ' IP(s) blocked';
+          el.style.color = '#ff8a3d';
+        } else {
+          el.textContent = 'No blocks';
+          el.style.color = '#4dd8ff';
+        }
+      })
+      .catch(function () {
+        var el = document.getElementById('stat-firewall');
+        if (el) el.textContent = '--';
+      });
+  }
+
+  // ============================================================
   //  INIT
   // ============================================================
   loadExistingSession().then(function () {
     loadPrevious();
+    // Load firewall status for the current target
+    var targetIp = (investigationData && investigationData.target_ip && investigationData.target_ip !== 'unknown')
+      ? investigationData.target_ip : null;
+    if (!targetIp) {
+      targetIp = document.getElementById('target-input').value.trim() || null;
+    }
+    loadFirewallStatus(targetIp);
   });
   bindReticle();
 </script>

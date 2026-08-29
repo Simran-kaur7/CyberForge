@@ -1587,6 +1587,69 @@ class TestIncidentTargetResolution:
             finally:
                 sdk_client.SESSIONS_FILE = original
 
+    def test_inc_day5_e2e_resolves_to_demo_target(self):
+        """INC-DAY5-E2E without explicit target_ip must resolve to 10.0.0.25."""
+        import tempfile
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                fake = {
+                    "success": True, "status": "complete",
+                    "evidence_complete": True, "query": "test",
+                    "target_ip": "10.0.0.25", "severity": "CRITICAL",
+                    "risk_score": {"score": 100, "level": "CRITICAL", "max_score": 100, "breakdown": {}},
+                    "findings": [], "evidence": [], "tools_used": ["search_security_logs", "check_system_activity", "analyze_evidence", "risk_score"],
+                    "recommendation": "test", "containment_allowed": True,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation") as mock_run:
+                    mock_run.return_value = fake
+                    result = investigate(InvestigationRequest(
+                        query="Investigate suspicious activity",
+                        incident_id="INC-DAY5-E2E",
+                    ))
+                    mock_run.assert_called_once_with("Investigate suspicious activity", "10.0.0.25")
+                    assert result["target_ip"] == "10.0.0.25"
+                    assert result["status"] == "complete"
+                    assert result["evidence_complete"] is True
+                    assert result["containment_allowed"] is True
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
+    def test_inc_day5_e2e_mixed_case_resolves(self):
+        """Lowercase inc-day5-e2e must also resolve to 10.0.0.25."""
+        import tempfile
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                fake = {
+                    "success": True, "status": "complete",
+                    "evidence_complete": True, "query": "test",
+                    "target_ip": "10.0.0.25", "severity": "HIGH",
+                    "risk_score": {"score": 80, "level": "HIGH", "max_score": 100, "breakdown": {}},
+                    "findings": [], "evidence": [], "tools_used": [],
+                    "recommendation": "test", "containment_allowed": True,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation") as mock_run:
+                    mock_run.return_value = fake
+                    for iid in ["inc-day5-e2e", "Inc-Day5-E2e", "INC-DAY5-E2E"]:
+                        mock_run.reset_mock()
+                        investigate(InvestigationRequest(query="test", incident_id=iid))
+                        mock_run.assert_called_once_with("test", "10.0.0.25")
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
     def test_mapping_constant_is_consistent(self):
         """The mapping constant must be present and contain valid IPs."""
         from app.api.investigate import _INCIDENT_TARGET_MAP, _validate_ip
@@ -1595,6 +1658,36 @@ class TestIncidentTargetResolution:
             assert isinstance(ip, str), f"Target for {iid} must be a string"
             assert _validate_ip(ip), f"Target {ip} for {iid} is not a valid IPv4 address"
 
+
+# ===========================================================================
+# TestFirewallEndpoint
+# ===========================================================================
+class TestFirewallEndpoint:
+    """Verify the /api/firewall endpoint returns safe firewall data."""
+
+    def test_firewall_returns_blocked_ips(self):
+        """The firewall endpoint must return the current blocked IPs."""
+        from app.api.incidents import get_firewall_status
+        result = get_firewall_status()
+        assert "blocked_ips" in result
+        assert "events" in result
+        assert isinstance(result["blocked_ips"], list)
+        assert isinstance(result["events"], list)
+
+    def test_firewall_includes_10_0_0_25(self):
+        """The simulated firewall should block 10.0.0.25."""
+        from app.api.incidents import get_firewall_status
+        result = get_firewall_status()
+        assert "10.0.0.25" in result["blocked_ips"]
+
+    def test_firewall_no_raw_paths_exposed(self):
+        """The endpoint must not expose filesystem paths."""
+        from app.api.incidents import get_firewall_status
+        import json
+        result = get_firewall_status()
+        result_str = json.dumps(result)
+        assert "/mcp_server/" not in result_str
+        assert "/data/" not in result_str
 
 # ===========================================================================
 #  Run all
@@ -1629,6 +1722,7 @@ def run_all():
         TestNullRiskNotZero,
         TestSessionPersistenceCompleteness,
         TestIncidentTargetResolution,
+        TestFirewallEndpoint,
     ]
 
     for cls in test_classes:

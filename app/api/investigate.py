@@ -64,6 +64,7 @@ _PERSISTENCE_FAILURE_DETAIL = "Investigation session could not be persisted."
 # target-specific evidence collection runs against the correct IP.
 _INCIDENT_TARGET_MAP: dict[str, str] = {
     "INC-1024": "10.0.0.25",
+    "INC-DAY5-E2E": "10.0.0.25",
 }
 
 
