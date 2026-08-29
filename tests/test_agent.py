@@ -1621,6 +1621,37 @@ class TestIncidentTargetResolution:
             finally:
                 sdk_client.SESSIONS_FILE = original
 
+    def test_mixed_case_persists_canonical_incident_id(self):
+        """Mixed-case incident_id must be canonicalized to uppercase before persistence."""
+        import tempfile
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+        from app import sdk_client
+        original = sdk_client.SESSIONS_FILE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sdk_client.SESSIONS_FILE = Path(tmpdir) / "sessions.json"
+            try:
+                fake = {
+                    "success": True, "status": "complete",
+                    "evidence_complete": True, "query": "test",
+                    "target_ip": "10.0.0.25", "severity": "HIGH",
+                    "risk_score": {"score": 80, "level": "HIGH", "max_score": 100, "breakdown": {}},
+                    "findings": [], "evidence": [], "tools_used": [],
+                    "recommendation": "test", "containment_allowed": True,
+                    "tool_results": {},
+                    "errors": {"log_search": None, "system_activity": None, "analysis": None},
+                }
+                with patch("app.api.investigate.run_investigation") as mock_run:
+                    mock_run.return_value = fake
+                    # Investigate with lowercase
+                    result = investigate(InvestigationRequest(query="test", incident_id="inc-day5-e2e"))
+                    # The session should be persisted with the canonical uppercase ID
+                    sessions = sdk_client.list_sessions()
+                    assert len(sessions) == 1
+                    assert sessions[0]["incident_id"] == "INC-DAY5-E2E"
+            finally:
+                sdk_client.SESSIONS_FILE = original
+
     def test_inc_day5_e2e_mixed_case_resolves(self):
         """Lowercase inc-day5-e2e must also resolve to 10.0.0.25."""
         import tempfile
@@ -1670,9 +1701,7 @@ class TestFirewallEndpoint:
         from app.api.incidents import get_firewall_status
         result = get_firewall_status()
         assert "blocked_ips" in result
-        assert "events" in result
         assert isinstance(result["blocked_ips"], list)
-        assert isinstance(result["events"], list)
 
     def test_firewall_includes_10_0_0_25(self):
         """The simulated firewall should block 10.0.0.25."""

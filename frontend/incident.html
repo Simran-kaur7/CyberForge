@@ -922,22 +922,20 @@ PORT  4444</span>
       })
       .then(function (sessions) {
         if (!Array.isArray(sessions)) return;
-        // Find the best session matching this incident ID.
-        // Prefer the newest complete session; fall back to the newest.
+        // Find the newest session matching this incident ID.
+        // The newest session is always authoritative — it represents the
+        // most recent investigation. Do NOT replace it with an older
+        // complete session, which could belong to a different target
+        // or represent stale evidence.
         var match = null;
-        var matchComplete = null;
         for (var i = 0; i < sessions.length; i++) {
           var s = sessions[i];
           if (s.incident_id === incidentId || s.id === incidentId) {
-            var isNewer = !match || (s.created_at || '') > (match.created_at || '');
-            if (isNewer) match = s;
-            var isComplete = s.investigation_status === 'complete';
-            if (isComplete && (!matchComplete || (s.created_at || '') > (matchComplete.created_at || ''))) {
-              matchComplete = s;
+            if (!match || (s.created_at || '') > (match.created_at || '')) {
+              match = s;
             }
           }
         }
-        if (matchComplete) match = matchComplete;
         if (!match) return;
 
         // Populate session state
