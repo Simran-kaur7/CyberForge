@@ -309,11 +309,19 @@ PORT  4444</span>
     { id: 'post-incident',title: 'Post-Incident Summary', desc: 'Generating final incident summary' }
   ];
 
-  function renderTimeline(activeIndex) {
+  function renderTimeline(activeIndex, skippedSteps) {
     var el = document.getElementById('timeline');
     el.innerHTML = '';
+    var skipped = skippedSteps || [];
     TIMELINE_STEPS.forEach(function (step, i) {
-      var cls = i < activeIndex ? 'done' : i === activeIndex ? 'active' : '';
+      var cls;
+      if (i < activeIndex) {
+        cls = skipped.indexOf(i) !== -1 ? 'skipped' : 'done';
+      } else if (i === activeIndex) {
+        cls = 'active';
+      } else {
+        cls = '';
+      }
       var li = document.createElement('li');
       li.className = cls;
       li.innerHTML = '<div class="t-title">' + step.title + '</div><div class="t-desc">' + step.desc + '</div>';
@@ -627,12 +635,12 @@ PORT  4444</span>
       }, 600);
     } else {
       // Rejected: Containment is skipped (not executed).
-      // Mark it done (no action taken), then show Post-Incident Summary.
+      // Show containment as skipped, then Post-Incident Summary complete.
       setTimeout(function () {
-        renderTimeline(6); // containment done (skipped), post-incident active
+        renderTimeline(6, [5]); // step 5 (containment) shown as skipped
       }, 400);
       setTimeout(function () {
-        renderTimeline(TIMELINE_STEPS.length); // all done
+        renderTimeline(TIMELINE_STEPS.length, [5]); // all done, containment skipped
       }, 1200);
     }
   }
@@ -1087,8 +1095,8 @@ PORT  4444</span>
           // Approved resolution: all stages including containment completed
           renderTimeline(TIMELINE_STEPS.length);
         } else if (match.status === 'resolved' && approvalDecision === 'rejected') {
-          // Rejected resolution: containment was skipped, post-incident ran
-          renderTimeline(4); // up to human gate
+          // Rejected resolution: containment was skipped
+          renderTimeline(TIMELINE_STEPS.length, [5]); // all stages, containment skipped
         } else if (investigationStatus === 'complete') {
           renderTimeline(4);
         } else if (investigationStatus === 'partial') {
