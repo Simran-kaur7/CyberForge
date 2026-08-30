@@ -25,6 +25,7 @@ from app.sdk_client import (
     ToolTimeoutError,
     analyze_evidence,
     check_system_activity,
+    claim_orphan_session,
     create_session,
     find_session_by_incident,
     list_sessions,
@@ -97,31 +98,53 @@ def investigate_incident(incident_id: str):
         ) from exc
 
     # Create or reuse a local session for this incident.
-    # Pass target_ip so that sessions created by /api/investigate (which
-    # filter by target_ip) can find and reuse this session instead of
-    # creating a duplicate.
+    # Try exact target_ip match first; then atomically claim any orphan
+    # (session with same incident_id but no target_ip) to prevent races
+    # where two concurrent investigations claim the same orphan.
     resolved_target = source_ip or None
-    existing = find_session_by_incident(incident_id, target_ip=resolved_target)
-    if existing:
-        local_session = existing
-    else:
+    local_session = None
+
+    if resolved_target:
+        # Exact match first
+        local_session = find_session_by_incident(incident_id, target_ip=resolved_target)
+
+        if not local_session:
+            # Atomically claim an orphan session (no target_ip)
+            local_session = claim_orphan_session(
+                incident_id, resolved_target,
+                evidence_snapshot=analysis,
+            )
+
+    if not local_session:
         local_session = create_session(
             incident_id,
             evidence_snapshot=analysis,
             **({"target_ip": resolved_target} if resolved_target else {}),
         )
 
-    # Keep session metadata consistent with actual investigation
-    update_result = update_session(
-        local_session["id"],
-        evidence_snapshot=analysis,
-        **({"target_ip": resolved_target} if resolved_target else {}),
-    )
+    # Keep session metadata consistent with actual investigation.
+    # Supersede any stale approval: the evidence and risk are being
+    # replaced, so an approval bound to the previous run's TrueForge
+    # tool call must not remain decidable.
+    try:
+        update_result = update_session(
+            local_session["id"],
+            evidence_snapshot=analysis,
+            supersede_stale_approval=True,
+            **({"target_ip": resolved_target} if resolved_target else {}),
+        )
+    except RuntimeError:
+        raise HTTPException(
+            status_code=409,
+            detail="An approval operation is in progress for this incident; retry after it completes.",
+        )
 
     if not update_result.get("success"):
-        # Session persistence is required because the investigation result is
-        # later used as the authoritative local session for approval actions.
-        # Do not report a complete investigation when that persistence failed.
+        if update_result.get("approval_in_progress"):
+            raise HTTPException(
+                status_code=409,
+                detail="An approval operation is in progress for this incident; retry after it completes.",
+            )
         logger.warning(
             "Failed to update session %s metadata: %s",
             local_session["id"],

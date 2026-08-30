@@ -2828,17 +2828,39 @@ def run_all():
             found = sdk_client.find_session_by_incident("INC-FB-1", target_ip="10.0.0.25")
             assert found["id"] == s1["id"]
 
-            # No exact match for different target → falls back to incident-id match
+            # No exact match for different target → falls back to orphan only
             found2 = sdk_client.find_session_by_incident("INC-FB-1", target_ip="192.168.1.50")
             assert found2 is not None, "Fallback must find a session"
-            # Returns newest by created_at
-            assert found2["id"] == s2["id"] or found2["id"] == s1["id"]
+            # Must return the orphan (no target_ip), NOT s1 (different target)
+            assert found2["id"] == s2["id"], f"Must return orphan s2, got {found2['id']}"
+            assert found2.get("target_ip") is None or found2.get("target_ip") == ""
 
             # No target_ip → matches all incident-id sessions
             found3 = sdk_client.find_session_by_incident("INC-FB-1")
             assert found3 is not None
         with_temp_sessions(body)
     check("test_find_session_fallback_when_no_exact_target_match", t133)
+
+    # 134: claim_orphan_session atomically claims and sets target_ip
+    def t134():
+        def body(sdk_client):
+            orphan = sdk_client.create_session("INC-CLAIM-1", evidence_snapshot={"stale": True})
+            assert orphan.get("target_ip") is None
+
+            claimed = sdk_client.claim_orphan_session("INC-CLAIM-1", "10.0.0.25")
+            assert claimed is not None, "Should claim the orphan"
+            assert claimed["id"] == orphan["id"]
+            assert claimed["target_ip"] == "10.0.0.25"
+
+            # Second claim returns None — orphan already claimed
+            claimed2 = sdk_client.claim_orphan_session("INC-CLAIM-1", "192.168.1.50")
+            assert claimed2 is None, "Must not claim already-claimed session"
+
+            # Original session was updated in place
+            sess = sdk_client.get_session(orphan["id"])
+            assert sess["target_ip"] == "10.0.0.25"
+        with_temp_sessions(body)
+    check("test_claim_orphan_session_atomic", t134)
 
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")

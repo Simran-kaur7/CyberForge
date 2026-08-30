@@ -374,6 +374,42 @@ def find_session_by_incident(iid: str, target_ip: str | None = None):
     )[0]
 
 
+def claim_orphan_session(iid: str, target_ip: str, **extra_fields) -> dict | None:
+    """Atomically find an orphan session (no target_ip) and claim it.
+
+    Returns the claimed session on success, or ``None`` if no orphan was
+    available (another caller already claimed it, or none existed).
+
+    The lookup and claim happen inside a single ``_mutate_sessions``
+    mutation so two concurrent callers cannot both claim the same orphan.
+    """
+    if not iid or not isinstance(iid, str) or not target_ip:
+        return None
+
+    def _claim(sessions):
+        # Find the newest orphan for this incident
+        orphan = None
+        for s in sessions:
+            if not isinstance(s, dict) or s.get("incident_id") != iid:
+                continue
+            if not s.get("target_ip"):
+                if orphan is None or (s.get("created_at") or "") > (orphan.get("created_at") or ""):
+                    orphan = s
+        if orphan is None:
+            return None
+        # CAS: only claim if still unclaimed
+        if orphan.get("target_ip"):
+            return None
+        orphan["target_ip"] = target_ip
+        for k, v in extra_fields.items():
+            if k not in _PROTECTED_SESSION_KEYS:
+                orphan[k] = v
+        orphan["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return orphan
+
+    return _mutate_sessions(_claim)
+
+
 # ---------------------------------------------------------------------------
 # Approval Flow (enforced state machine)
 # ---------------------------------------------------------------------------
