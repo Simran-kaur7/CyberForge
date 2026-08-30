@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -2505,11 +2505,20 @@ def run_all():
     # ------------------------------------------------------------------
 
     # 125: Full workflow — investigate creates session, approve resolves it
-    # AND blocks IP in simulated_firewall.json.
+    # AND blocks IP in simulated_firewall.json via the real approval endpoint.
     def t125():
         import json as _json
         from pathlib import Path
         from app.api.investigate import investigate, InvestigationRequest
+        import app.api.approvals as approvals_mod
+        from app.api.approvals import DecisionRequest
+
+        fw_path = Path(__file__).resolve().parent.parent / "mcp_server" / "data" / "simulated_firewall.json"
+        fw_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Snapshot firewall state so we can restore after the test
+        original_fw = fw_path.read_text() if fw_path.exists() else None
+        original_key = approvals_mod.EXPECTED_API_KEY
 
         def body(sdk_client):
             # --- Step 1: Investigate the incident ---
@@ -2533,11 +2542,19 @@ def run_all():
             sess = sdk_client.get_session(sid)
             assert sess["approval_state"]["status"] == "pending"
 
-            # --- Step 3: Approve — resolves session + writes firewall ---
-            pr = sdk_client.prepare_decision(sid, aid, "approved")
-            cr = sdk_client.complete_decision(sid, aid, pr["token"])
-            assert cr["success"] is True
-            assert cr["status"] == "approved"
+            # --- Step 3: Approve via the real approval endpoint ---
+            approvals_mod.EXPECTED_API_KEY = "test-key"
+            try:
+                approvals_mod.approve_containment(
+                    DecisionRequest(
+                        session_id=sid,
+                        action_id=aid,
+                        decided_by="analyst",
+                    ),
+                    "Bearer test-key",
+                )
+            finally:
+                approvals_mod.EXPECTED_API_KEY = original_key
 
             # Session must be resolved
             sess = sdk_client.get_session(sid)
@@ -2545,18 +2562,19 @@ def run_all():
             assert sess["approval_state"]["status"] == "approved"
             assert sess["approval_state"].get("decided_at") is not None
 
-            # Execute block_ip (same as approvals.py does)
-            fw_path = Path(__file__).resolve().parent.parent / "mcp_server" / "data" / "simulated_firewall.json"
-            fw_path.parent.mkdir(parents=True, exist_ok=True)
-            from mcp_server.tools.block_ip import block_ip as do_block
-            do_block("10.0.0.25")
-
-            # Firewall must have the blocked IP
+            # Firewall must have the blocked IP (written by approve_containment)
             fw = _json.loads(fw_path.read_text())
             assert "10.0.0.25" in fw["blocked_ips"]
             block_events = [e for e in fw["events"] if e["ip"] == "10.0.0.25"]
             assert len(block_events) >= 1
-        with_temp_sessions(body)
+        try:
+            with_temp_sessions(body)
+        finally:
+            # Restore firewall to pre-test state
+            if original_fw is not None:
+                fw_path.write_text(original_fw)
+            elif fw_path.exists():
+                fw_path.unlink()
     check("test_full_workflow_investigate_approve_resolves_blocks_ip", t125)
 
     # 126: Reinvestigating the same incident reuses the existing session
@@ -2692,19 +2710,27 @@ def run_all():
             )
             original_sid = s["id"]
 
+            find_spy = MagicMock(wraps=incidents_mod.find_session_by_incident)
+            update_spy = MagicMock(wraps=incidents_mod.update_session)
+
             # Now call investigate_incident — must reuse the same session
             with patch.object(incidents_mod, "analyze_evidence", return_value=fake_analysis), \
                  patch.object(incidents_mod, "search_security_logs", return_value=fake_logs), \
                  patch.object(incidents_mod, "check_system_activity", return_value=fake_activity), \
-                 patch.object(incidents_mod, "find_session_by_incident", wraps=incidents_mod.find_session_by_incident), \
-                 patch.object(incidents_mod, "update_session", wraps=incidents_mod.update_session), \
+                 patch.object(incidents_mod, "find_session_by_incident", side_effect=find_spy), \
+                 patch.object(incidents_mod, "update_session", side_effect=update_spy), \
                  patch.object(incidents_mod, "persist_trueforge_session_id", return_value={"success": True, "trueforge_session_id": None}), \
                  patch.object(incidents_mod, "_require_successful_tool_result", side_effect=lambda result, name: result), \
                  patch("urllib.request.urlopen", side_effect=ConnectionError("TrueForge not running")):
                 try:
                     result = incidents_mod.investigate_incident("INC-1024")
-                except Exception:
-                    pass  # TrueForge connection fails, but local session should be reused
+                except ConnectionError:
+                    pass  # Expected: TrueForge connection fails, local session reused
+
+            # Verify find_session_by_incident was called WITH target_ip (the fix)
+            find_spy.assert_called_once_with("INC-1024", target_ip="10.0.0.25")
+            # Verify update_session was called to refresh the existing session
+            update_spy.assert_called_once()
 
             # Session count must still be 1 — no duplicate
             all_sessions = sdk_client.list_sessions()
