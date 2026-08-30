@@ -816,6 +816,25 @@ def _decide_containment(
     if not completed.get("success"):
         raise HTTPException(status_code=409, detail=completed.get("error", "Decision finalization failed"))
 
+    # Directly execute block_ip when approved so the firewall file is updated
+    # even if TrueForge is not connected.
+    if decision == "approved":
+        try:
+            from mcp_server.tools.block_ip import block_ip
+            import json as _json, pathlib as _pathlib
+            target_ip = None
+            sessions_file = _pathlib.Path(__file__).resolve().parent.parent.parent / "mcp_server" / "data" / "sessions.json"
+            if sessions_file.exists():
+                sessions = _json.loads(sessions_file.read_text())
+                for s in sessions:
+                    if s.get("id") == body.session_id:
+                        target_ip = s.get("target_ip")
+                        break
+            if target_ip and target_ip != "unknown":
+                block_ip(target_ip)
+        except Exception:
+            pass  # Best effort
+
     return {
         "success": True,
         "action_id": body.action_id,

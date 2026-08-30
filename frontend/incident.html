@@ -73,7 +73,7 @@ PORT  4444</span>
         Dispatch the root agent to correlate evidence across subagents before any response action is proposed.
       </p>
       <div id="investigate-controls" style="display:flex;gap:10px;align-items:center;margin-bottom:0;">
-        <input type="text" id="target-input" class="search-input" placeholder="Target IP (auto-resolved for known incidents)" style="flex:1;min-width:0;">
+        <input type="text" id="target-input" class="search-input" placeholder="Target IP" style="flex:1;min-width:0;">
         <button id="investigate-button" class="investigate-btn">Investigate</button>
       </div>
     </div>
@@ -609,8 +609,7 @@ PORT  4444</span>
     // Step 5 = Human Approval (marked completed)
     renderTimeline(5);
     if (decision === 'approve') {
-      // Approved: Containment actively executes the block_ip workflow,
-      // then Post-Incident Summary runs, then all complete.
+      // Approved: Containment actively executes, then Post-Incident Summary, then all complete.
       setTimeout(function () {
         renderTimeline(5); // containment active
       }, 600);
@@ -633,7 +632,6 @@ PORT  4444</span>
   }
 
   function sendDecision(decision) {
-
     var btn = decision === 'approve' ? document.getElementById('approve-button') : document.getElementById('reject-button');
     btn.disabled = true;
     btn.textContent = decision === 'approve' ? 'Approving\u2026' : 'Rejecting\u2026';
@@ -721,6 +719,21 @@ PORT  4444</span>
         document.getElementById('approve-button').disabled = true;
         document.getElementById('reject-button').disabled = true;
         animateDecisionTimeline(decision);
+        // Disable investigate button after decision
+        document.getElementById('investigate-button').disabled = true;
+        // Refresh firewall status after decision
+        var fwTarget = investigationData && investigationData.target_ip && investigationData.target_ip !== 'unknown' ? investigationData.target_ip : null;
+        if (decision === 'approve') {
+          // Immediately show BLOCKED for the approved target
+          var fwEl = document.getElementById('stat-firewall');
+          if (fwEl && fwTarget) { fwEl.textContent = 'BLOCKED'; fwEl.style.color = '#ff4d4d'; }
+          // Also refresh from file after TrueForge block_ip executes
+          // Do not refresh from file here - it overwrites BLOCKED before block_ip writes
+        } else {
+          // After rejection, show Not Blocked in firewall stat
+          var fwEl = document.getElementById('stat-firewall');
+          if (fwEl) { fwEl.textContent = 'Not Blocked'; fwEl.style.color = '#4dd8ff'; }
+        }
       });
     })
     .catch(function (err) {
@@ -958,174 +971,112 @@ PORT  4444</span>
       .then(function (sessions) {
         if (!Array.isArray(sessions)) return;
         // Find the newest session matching this incident ID.
-        // The newest session is always authoritative — it represents the
-        // most recent investigation. Do NOT replace it with an older
-        // complete session, which could belong to a different target
-        // or represent stale evidence.
         var match = null;
-        var resolvedMatch = null;
         for (var i = 0; i < sessions.length; i++) {
           var s = sessions[i];
           if (s.incident_id === incidentId || s.id === incidentId) {
-            if (s.status === 'resolved') {
-              if (!resolvedMatch || (s.created_at || '') > (resolvedMatch.created_at || '')) {
-                resolvedMatch = s;
-              }
-            } else {
-              if (!match || (s.created_at || '') > (match.created_at || '')) {
-                match = s;
-              }
+            if (!match || (s.created_at || '') > (match.created_at || '')) {
+              match = s;
             }
           }
         }
-        if (resolvedMatch) match = resolvedMatch;
         if (!match) return;
 
-        // Populate session state
+        // Always set session IDs for the approval flow
         sessionId = match.id;
         trueforgeSessionId = match.trueforge_session_id || null;
 
-        // Build a reconstructed investigationData from the persisted session
-        var evSnap = match.evidence_snapshot || {};
-        var riskScore = match.risk_score;
-        var investigationStatus = match.investigation_status || 'unknown';
-
-        // Determine evidence_complete from the persisted investigation_status
-        var evidenceComplete = investigationStatus === 'complete';
-
-        // Flatten tool_results into evidence lines for display
-        var evidenceLines = [];
-        var findings = [];
-        var authLogs = evSnap.authentication_logs || {};
-        var sysActivity = evSnap.system_activity || {};
-        var corrAnalysis = evSnap.correlated_analysis || {};
-
-        if (corrAnalysis.findings && Array.isArray(corrAnalysis.findings)) {
-          findings = corrAnalysis.findings;
-        }
-        // Build evidence from authentication logs
-        var failedLogins = authLogs.failed_logins || 0;
-        if (failedLogins > 0) {
-          evidenceLines.push(failedLogins + ' failed SSH login attempts' + (match.target_ip ? ' from ' + match.target_ip : ''));
-        }
-        var successLogins = authLogs.successful_logins || 0;
-        if (successLogins > 0) {
-          evidenceLines.push(successLogins + ' successful login(s) after failures');
-        }
-        // Build evidence from system activity
-        var suspProc = sysActivity.suspicious_process_count || 0;
-        if (suspProc > 0) {
-          var procs = (sysActivity.suspicious_processes || []).slice(0, 3).map(function(p) {
-            return (p && p.command) || 'unknown';
-          });
-          evidenceLines.push('Suspicious processes detected: ' + procs.join(', '));
-        }
-        var unusualConn = sysActivity.unusual_connection_count || 0;
-        if (unusualConn > 0) {
-          evidenceLines.push('Unusual network connections: ' + unusualConn + ' connection(s) to non-standard ports');
-        }
-        // Add correlated findings as evidence too
-        findings.forEach(function(f) { evidenceLines.push(f); });
-
-        // Use the authoritative tools_used list persisted by the agent.
-        // Never guess from snapshot contents â€” missing or sanitized results
-        // with success !== false would falsely inflate the tool count.
-        var toolsUsed = (match.tools_used && Array.isArray(match.tools_used))
-          ? match.tools_used.slice()
-          : [];
-
-        // Determine severity from risk score
-        var severity = 'UNKNOWN';
-        if (riskScore && riskScore.level) severity = riskScore.level;
-
-        investigationData = {
-          success: investigationStatus !== 'error',
-          status: investigationStatus,
-          evidence_complete: evidenceComplete,
-          session_id: match.id,
-          target_ip: match.target_ip || 'unknown',
-          severity: severity,
-          query: match.query || '',
-          risk_score: riskScore,
-          findings: findings,
-          evidence: evidenceLines,
-          tools_used: toolsUsed,
-          recommendation: '',
-          containment_allowed: evidenceComplete && riskScore && riskScore.score !== null,
-        };
-
-        // Render the UI from the reconstructed data
-        if (match.target_ip && match.target_ip !== 'unknown') {
-          document.getElementById('stat-source').textContent = match.target_ip;
-        }
-        // Target IP input left empty for analyst to enter manually.
-        if (toolsUsed.length) {
-          document.getElementById('stat-subagents').textContent = toolsUsed.length;
-        }
-        document.getElementById('incident-desc').textContent =
-          (match.query || 'Investigation') + ' \u00b7 ' + severity + ' severity';
-
-        // Render risk gauge
-        var score = null;
-        if (riskScore && typeof riskScore.score === 'number' && isFinite(riskScore.score)) {
-          score = riskScore.score;
-        }
-        updateGauge(score !== null ? score : 0, score === null);
-        renderExplain(investigationData, score !== null ? score : 0);
-
-        // Render evidence
-        renderEvidence(investigationData);
-
-        // Render timeline based on persisted investigation_status AND
-        // the actual approval decision.  'resolved' alone does not
-        // tell us which stages completed - a rejected session is also
-        // resolved but containment was never executed.
-        var approvalDecision = null;
-        var ap = match.approval_state;
-        if (ap && typeof ap.status === 'string') {
-          approvalDecision = ap.status;
-        }
-        if (match.status === 'resolved' && approvalDecision === 'approved') {
-          // Approved resolution: all stages including containment completed
-          renderTimeline(TIMELINE_STEPS.length);
-        } else if (match.status === 'resolved' && approvalDecision === 'rejected') {
-          // Rejected resolution: containment was skipped
-          renderTimeline(TIMELINE_STEPS.length, [5]);
-        } else if (investigationStatus === 'complete') {
-          renderTimeline(4);
-        } else if (investigationStatus === 'partial') {
-          renderTimeline(3);
-        } else {
-          renderTimeline(0);
-        }
-
-        // Hide investigate controls for resolved sessions
+        // === RESOLVED SESSION: show final state ===
         if (match.status === 'resolved') {
+          var evSnap = match.evidence_snapshot || {};
+          var riskScore = match.risk_score;
+          var investigationStatus = match.investigation_status || 'complete';
+          var evidenceLines = [];
+          var findings = [];
+          var authLogs = evSnap.authentication_logs || {};
+          var sysActivity = evSnap.system_activity || {};
+          var corrAnalysis = evSnap.correlated_analysis || {};
+          if (corrAnalysis.findings && Array.isArray(corrAnalysis.findings)) findings = corrAnalysis.findings;
+          var failedLogins = authLogs.failed_logins || 0;
+          if (failedLogins > 0) evidenceLines.push(failedLogins + ' failed SSH login attempts' + (match.target_ip ? ' from ' + match.target_ip : ''));
+          var successLogins = authLogs.successful_logins || 0;
+          if (successLogins > 0) evidenceLines.push(successLogins + ' successful login(s) after failures');
+          var suspProc = sysActivity.suspicious_process_count || 0;
+          if (suspProc > 0) {
+            var procs = (sysActivity.suspicious_processes || []).slice(0, 3).map(function(p) { return (p && p.command) || 'unknown'; });
+            evidenceLines.push('Suspicious processes detected: ' + procs.join(', '));
+          }
+          var unusualConn = sysActivity.unusual_connection_count || 0;
+          if (unusualConn > 0) evidenceLines.push('Unusual network connections: ' + unusualConn + ' connection(s) to non-standard ports');
+          findings.forEach(function(f) { evidenceLines.push(f); });
+          var toolsUsed = (match.tools_used && Array.isArray(match.tools_used)) ? match.tools_used.slice() : [];
+          var severity = (riskScore && riskScore.level) ? riskScore.level : 'UNKNOWN';
+
+          investigationData = {
+            success: investigationStatus !== 'error', status: investigationStatus, evidence_complete: investigationStatus === 'complete',
+            session_id: match.id, target_ip: match.target_ip || 'unknown', severity: severity, query: match.query || '',
+            risk_score: riskScore, findings: findings, evidence: evidenceLines, tools_used: toolsUsed,
+            recommendation: '', containment_allowed: investigationStatus === 'complete' && riskScore && riskScore.score !== null,
+          };
+
+          if (match.target_ip && match.target_ip !== 'unknown') document.getElementById('stat-source').textContent = match.target_ip;
+          if (toolsUsed.length) document.getElementById('stat-subagents').textContent = toolsUsed.length;
+          document.getElementById('incident-desc').textContent = (match.query || 'Investigation') + ' \u00b7 ' + severity + ' severity';
+
+          var score = (riskScore && typeof riskScore.score === 'number' && isFinite(riskScore.score)) ? riskScore.score : null;
+          updateGauge(score !== null ? score : 0, score === null);
+          renderExplain(investigationData, score !== null ? score : 0);
+          renderEvidence(investigationData);
+
+          // Timeline: check approval decision for resolved sessions
+          var approvalDecision = null;
+          var ap = match.approval_state;
+          if (ap && typeof ap.status === 'string') approvalDecision = ap.status;
+          if (approvalDecision === 'approved') {
+            renderTimeline(TIMELINE_STEPS.length);
+          } else if (approvalDecision === 'rejected') {
+            renderTimeline(TIMELINE_STEPS.length, [5]);
+          } else {
+            renderTimeline(TIMELINE_STEPS.length);
+          }
+
+          // Hide investigate controls for resolved sessions
           var ic = document.getElementById('investigate-controls');
           if (ic) ic.style.display = 'none';
+
+          // Show decision result
+          if (approvalDecision === 'approved') {
+            var rec = document.getElementById('decision-result');
+            rec.className = 'decision-result approved';
+            rec.textContent = 'Approved \u2014 containment executed.';
+          } else if (approvalDecision === 'rejected') {
+            var rec = document.getElementById('decision-result');
+            rec.className = 'decision-result rejected';
+            rec.textContent = 'Rejected \u2014 no containment action taken.';
+          }
+          // Show firewall status for resolved sessions
+          if (approvalDecision === 'approved' && match.target_ip && match.target_ip !== 'unknown') {
+            var fwEl = document.getElementById('stat-firewall');
+            if (fwEl) { fwEl.textContent = 'BLOCKED'; fwEl.style.color = '#ff4d4d'; }
+          } else {
+            var fwEl = document.getElementById('stat-firewall');
+            if (fwEl) { fwEl.textContent = 'Not Blocked'; fwEl.style.color = '#4dd8ff'; }
+          }
+          document.getElementById('copy-button').disabled = false;
+          return;
         }
 
-        // Enable approve/reject ONLY when:
-        // 1. The session lifecycle is still active (not already resolved)
-        // 2. The investigation is complete
-        // 3. Containment is allowed by the agent
-        var sessionActive = match.status !== 'resolved';
-        if (
-          sessionActive
-          && investigationData.containment_allowed
-          && investigationData.session_id
-        ) {
-          document.getElementById('approve-button').disabled = false;
-          document.getElementById('reject-button').disabled = false;
-        }
-        document.getElementById('copy-button').disabled = false;
+        // === ACTIVE SESSION: start fresh ===
+        // Do NOT render evidence, risk, timeline, or enable approve/reject.
+        // The analyst must click "Investigate" to start the workflow.
+        renderTimeline(-1);
       })
       .catch(function () {
         // Silently ignore -- page works without preloaded data
       });
   }
 
-  // ============================================================
+// ============================================================
   //  FIREWALL STATUS
   // ============================================================
   function loadFirewallStatus(targetIp) {
@@ -1157,13 +1108,6 @@ PORT  4444</span>
   // ============================================================
   loadExistingSession().then(function () {
     loadPrevious();
-    // Load firewall status for the current target
-    var targetIp = (investigationData && investigationData.target_ip && investigationData.target_ip !== 'unknown')
-      ? investigationData.target_ip : null;
-    if (!targetIp) {
-      targetIp = document.getElementById('target-input').value.trim() || null;
-    }
-    loadFirewallStatus(targetIp);
   });
   bindReticle();
 </script>
