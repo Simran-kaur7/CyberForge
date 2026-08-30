@@ -1,0 +1,13 @@
+{
+  "blocked_ips": [
+    "10.0.0.25"
+  ],
+  "events": [
+    {
+      "action": "block",
+      "ip": "10.0.0.25",
+      "timestamp": "2026-08-28T00:00:00Z",
+      "reason": "Demo"
+    }
+  ]
+}

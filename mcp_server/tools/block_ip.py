@@ -87,6 +87,31 @@ def block_ip(ip_address: str) -> dict:
             pass
         raise
 
+    # Update sessions.json so the frontend reflects containment
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        sessions_file = FIREWALL_FILE.parent / "sessions.json"
+        if sessions_file.exists():
+            sessions = json.loads(sessions_file.read_text(encoding="utf-8"))
+            now = _dt.now(_tz.utc).isoformat()
+            updated = False
+            for s in sessions:
+                ap = s.get("approval_state") or {}
+                is_approved = ap.get("status") == "approved"
+                is_active = s.get("status") == "active"
+                has_target = (s.get("target_ip") or "") == ip_address
+                no_containment = not s.get("contained_at")
+                if no_containment and (is_approved or (is_active and has_target)):
+                    s["contained_at"] = now
+                    s["contained_ip"] = ip_address
+                    s["containment_action"] = "block_ip"
+                    s["updated_at"] = now
+                    updated = True
+            if updated:
+                sessions_file.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
+    except Exception:
+        pass  # Best effort
+
     return {
         "success": True,
         "mode": "SIMULATED",

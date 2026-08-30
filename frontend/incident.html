@@ -724,11 +724,10 @@ PORT  4444</span>
         // Refresh firewall status after decision
         var fwTarget = investigationData && investigationData.target_ip && investigationData.target_ip !== 'unknown' ? investigationData.target_ip : null;
         if (decision === 'approve') {
-          // Immediately show BLOCKED for the approved target
+          // Show pending until block_ip actually executes
           var fwEl = document.getElementById('stat-firewall');
-          if (fwEl && fwTarget) { fwEl.textContent = 'BLOCKED'; fwEl.style.color = '#ff4d4d'; }
-          // Also refresh from file after TrueForge block_ip executes
-          // Do not refresh from file here - it overwrites BLOCKED before block_ip writes
+          if (fwEl) { fwEl.textContent = 'Containment pending'; fwEl.style.color = '#ff8a3d'; }
+          // The 5s periodic refresh will update to BLOCKED once block_ip writes to file
         } else {
           // After rejection, show Not Blocked in firewall stat
           var fwEl = document.getElementById('stat-firewall');
@@ -1079,12 +1078,15 @@ PORT  4444</span>
 // ============================================================
   //  FIREWALL STATUS
   // ============================================================
+  var _fwSeq = 0;
   function loadFirewallStatus(targetIp) {
+    var seq = ++_fwSeq;
     fetch(API_BASE + '/api/firewall')
       .then(function (r) { return r.json(); })
       .then(function (fw) {
         var el = document.getElementById('stat-firewall');
         if (!el) return;
+        if (seq !== _fwSeq) return; // stale response, discard
         var blocked = (fw.blocked_ips || []);
         if (targetIp && blocked.indexOf(targetIp) !== -1) {
           el.textContent = 'BLOCKED';
@@ -1098,6 +1100,7 @@ PORT  4444</span>
         }
       })
       .catch(function () {
+        if (seq !== _fwSeq) return; // stale response, discard
         var el = document.getElementById('stat-firewall');
         if (el) el.textContent = '--';
       });
@@ -1109,6 +1112,16 @@ PORT  4444</span>
   loadExistingSession().then(function () {
     loadPrevious();
   });
+
+  // Periodically refresh firewall status to reflect TrueForge changes
+  setInterval(function () {
+    var fwTarget = investigationData && investigationData.target_ip && investigationData.target_ip !== 'unknown'
+      ? investigationData.target_ip : null;
+    if (!fwTarget) {
+      fwTarget = document.getElementById('target-input').value.trim() || null;
+    }
+    if (fwTarget) loadFirewallStatus(fwTarget);
+  }, 5000);
   bindReticle();
 </script>
 
