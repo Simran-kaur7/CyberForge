@@ -18,3 +18,6 @@
 @keyframes cyberDataDrift{0%,100%{opacity:.2;transform:translateY(0)}50%{opacity:.65;transform:translateY(-12px)}}
 @media(prefers-reduced-motion:reduce){.cyber-bg-layer::before,.cyber-bg-layer::after,.cyber-node,.cyber-node::before,.cyber-node::after,.cyber-signal,.cyber-data{animation:none!important}.cyber-bg-layer{opacity:.5}}
 @media(pointer:coarse){.cyber-bg-layer{opacity:.58}}
+
+/* Keep the scanner cursor visible while allowing text underneath to show through. */
+.reticle-ring::before{background:rgba(7,9,13,.28)}
