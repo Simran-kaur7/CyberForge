@@ -842,7 +842,17 @@ def _decide_containment(
                                 target_ip = m.group(1)
                         break
             if target_ip and target_ip != "unknown":
-                block_ip(target_ip)
+                block_result = block_ip(target_ip)
+                # Record containment in the session so frontend reflects it
+                if block_result.get("success"):
+                    from app.sdk_client import update_session as _upd
+                    from datetime import datetime as _dt, timezone as _tz
+                    _upd(
+                        body.session_id,
+                        contained_at=_dt.now(_tz.utc).isoformat(),
+                        contained_ip=target_ip,
+                        containment_action="block_ip",
+                    )
         except Exception:
             pass  # Best effort
 

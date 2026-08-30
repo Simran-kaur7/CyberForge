@@ -330,6 +330,9 @@ def list_sessions() -> list:
             "target_ip": s.get("target_ip"),
             "query": s.get("query"),
             "tools_used": s.get("tools_used"),
+            "contained_at": s.get("contained_at"),
+            "contained_ip": s.get("contained_ip"),
+            "containment_action": s.get("containment_action"),
         }
         for s in _read_sessions()
     ]
