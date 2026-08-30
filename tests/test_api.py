@@ -2862,6 +2862,44 @@ def run_all():
         with_temp_sessions(body)
     check("test_claim_orphan_session_atomic", t134)
 
+    # ------------------------------------------------------------------
+    # 135: TF forwarding failure => block_ip NOT called, action retryable
+    # ------------------------------------------------------------------
+    def t135():
+        from app.api.approvals import _decide_containment, DecisionRequest
+        from unittest.mock import patch as _patch
+
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-TF-FWFAIL")
+            sid = s["id"]
+            sdk_client.update_session(sid, target_ip="10.0.0.25")
+            sdk_client.persist_trueforge_session_id(sid, "tf-fwfail")
+            r = sdk_client.request_approval(sid, "block_ip", {"incident_id": "INC-TF-FWFAIL"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.set_approval_tool_call_id(sid, aid, "tc-fwfail")
+
+            with _patch("app.api.approvals._forward_decision", side_effect=RuntimeError("TF down")):
+                with _patch("app.api.approvals._best_effort_block_ip") as mock_bip:
+                    result = _decide_containment(
+                        DecisionRequest(
+                            session_id=sid, action_id=aid,
+                            tool_call_id="tc-fwfail", trueforge_session_id="tf-fwfail",
+                            decided_by="analyst",
+                        ),
+                        "analyst", "approved",
+                    )
+                    mock_bip.assert_not_called()
+
+            assert result["success"] is False
+            assert result["retryable"] is True
+            assert result["status"] == "pending"
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["status"] == "pending"
+            assert sess.get("contained_at") is None
+        with_temp_sessions(body)
+    check("test_tf_forwarding_failure_no_block_ip", t135)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:

@@ -832,10 +832,9 @@ def _decide_containment(
             )
         except Exception:
             # TrueForge forwarding failed — the action must remain
-            # pending/retryable. Do NOT call complete_decision: the
-            # upstream tool call may still be pending and a retry must
-            # be possible. Run block_ip locally as best-effort so the
-            # firewall is updated even if TrueForge is unreachable.
+            # pending/retryable. Do NOT call complete_decision or
+            # block_ip: the upstream tool call may still be pending
+            # and a retry must be possible.
             logger.exception(
                 "TrueForge decision forwarding failed for session=%s "
                 "action=%s tool_call_id=%s",
@@ -849,8 +848,6 @@ def _decide_containment(
                 token,
                 "TrueForge decision forwarding failed",
             )
-            if decision == "approved":
-                _best_effort_block_ip(body.session_id)
             return {
                 "success": False,
                 "action_id": body.action_id,
