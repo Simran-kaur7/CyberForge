@@ -1102,6 +1102,10 @@ def update_session(sid: str, *, supersede_stale_approval: bool = False, **kw) ->
                 # and the incident page can initiate another approval.
                 if supersede_stale_approval and s.get("status") == "resolved":
                     s["status"] = "active"
+                    # Clear stale containment metadata from previous cycle
+                    s.pop("contained_at", None)
+                    s.pop("contained_ip", None)
+                    s.pop("containment_action", None)
                 s["updated_at"] = datetime.now(timezone.utc).isoformat()
                 result = {"success": True, "session": s}
                 if superseded_action_id:
