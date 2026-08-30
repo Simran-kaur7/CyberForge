@@ -87,28 +87,29 @@ def block_ip(ip_address: str) -> dict:
             pass
         raise
 
-    # Update sessions.json so the frontend reflects containment
+    # Update sessions.json so the frontend reflects containment.
+    # Uses the SDK's atomic file lock to prevent concurrent writes.
     try:
+        import sys as _sys, pathlib as _p
+        _sys.path.insert(0, str(_p.Path(__file__).resolve().parent.parent.parent))
+        from app.sdk_client import _mutate_sessions
         from datetime import datetime as _dt, timezone as _tz
-        sessions_file = FIREWALL_FILE.parent / "sessions.json"
-        if sessions_file.exists():
-            sessions = json.loads(sessions_file.read_text(encoding="utf-8"))
-            now = _dt.now(_tz.utc).isoformat()
-            updated = False
+        now = _dt.now(_tz.utc).isoformat()
+        def _mark_contained(sessions):
             for s in sessions:
                 ap = s.get("approval_state") or {}
-                is_approved = ap.get("status") == "approved"
-                is_active = s.get("status") == "active"
                 has_target = (s.get("target_ip") or "") == ip_address
                 no_containment = not s.get("contained_at")
-                if no_containment and (is_approved or (is_active and has_target)):
+                # Fix #1: require target_ip match for ALL sessions
+                if not has_target:
+                    continue
+                if no_containment and (ap.get("status") == "approved" or s.get("status") == "active"):
                     s["contained_at"] = now
                     s["contained_ip"] = ip_address
                     s["containment_action"] = "block_ip"
                     s["updated_at"] = now
-                    updated = True
-            if updated:
-                sessions_file.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
+            return sessions
+        _mutate_sessions(_mark_contained)
     except Exception:
         pass  # Best effort
 
