@@ -1,5 +1,4 @@
 {
-  "blocked_ips": [
-  ],
-  "events": [ ]
+  "blocked_ips": [],
+  "events": []
 }
