@@ -722,6 +722,30 @@ def _forward_decision(
     )
 
 
+def _best_effort_block_ip(session_id: str) -> None:
+    """Execute block_ip locally as a best-effort firewall update.
+
+    Called when TrueForge forwarding fails but the approved decision
+    should still produce a local firewall rule. Failures are swallowed —
+    this is a side-effect, not the authoritative containment path.
+    """
+    try:
+        from mcp_server.tools.block_ip import block_ip
+        import json as _json, pathlib as _pathlib
+        target_ip = None
+        sessions_file = _pathlib.Path(__file__).resolve().parent.parent.parent / "mcp_server" / "data" / "sessions.json"
+        if sessions_file.exists():
+            sessions = _json.loads(sessions_file.read_text())
+            for s in sessions:
+                if s.get("id") == session_id:
+                    target_ip = s.get("target_ip")
+                    break
+        if target_ip and target_ip != "unknown":
+            block_ip(target_ip)
+    except Exception:
+        pass
+
+
 def _decide_containment(
     body: DecisionRequest,
     analyst: str,
@@ -776,7 +800,6 @@ def _decide_containment(
         )
 
     tf_event = None
-    tf_forward_failed = False
     if tf_session_id and tool_call_id:
         try:
             tf_event = _forward_decision(
@@ -787,18 +810,36 @@ def _decide_containment(
                 thread_id,
             )
         except Exception:
-            # TrueForge forwarding failed, but the containment may have
-            # already been executed upstream. Log the failure but do NOT
-            # raise — we must still resolve the local session so the
-            # incident moves to Resolved and block_ip runs locally.
+            # TrueForge forwarding failed — the action must remain
+            # pending/retryable. Do NOT call complete_decision: the
+            # upstream tool call may still be pending and a retry must
+            # be possible. Run block_ip locally as best-effort so the
+            # firewall is updated even if TrueForge is unreachable.
             logger.exception(
                 "TrueForge decision forwarding failed for session=%s "
-                "action=%s tool_call_id=%s — completing locally",
+                "action=%s tool_call_id=%s",
                 body.session_id,
                 body.action_id,
                 tool_call_id,
             )
-            tf_forward_failed = True
+            fail_decision(
+                body.session_id,
+                body.action_id,
+                token,
+                "TrueForge decision forwarding failed",
+            )
+            if decision == "approved":
+                _best_effort_block_ip(body.session_id)
+            return {
+                "success": False,
+                "action_id": body.action_id,
+                "session_id": body.session_id,
+                "status": "pending",
+                "analyst": analyst,
+                "trueforge_event": tf_event,
+                "error": "TrueForge decision forwarding failed; retryable.",
+                "retryable": True,
+            }
 
     completed = complete_decision(
         body.session_id,
@@ -808,24 +849,9 @@ def _decide_containment(
     if not completed.get("success"):
         raise HTTPException(status_code=409, detail=completed.get("error", "Decision finalization failed"))
 
-    # Directly execute block_ip when approved so the firewall file is updated
-    # even if TrueForge is not connected or its forwarding failed.
+    # Execute block_ip when approved so the firewall file is updated.
     if decision == "approved":
-        try:
-            from mcp_server.tools.block_ip import block_ip
-            import json as _json, pathlib as _pathlib
-            target_ip = None
-            sessions_file = _pathlib.Path(__file__).resolve().parent.parent.parent / "mcp_server" / "data" / "sessions.json"
-            if sessions_file.exists():
-                sessions = _json.loads(sessions_file.read_text())
-                for s in sessions:
-                    if s.get("id") == body.session_id:
-                        target_ip = s.get("target_ip")
-                        break
-            if target_ip and target_ip != "unknown":
-                block_ip(target_ip)
-        except Exception:
-            pass  # Best effort
+        _best_effort_block_ip(body.session_id)
 
     return {
         "success": True,
@@ -833,7 +859,6 @@ def _decide_containment(
         "status": completed["status"],
         "analyst": analyst,
         "trueforge_event": tf_event,
-        "trueforge_forward_failed": tf_forward_failed,
     }
 
 
