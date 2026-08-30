@@ -96,20 +96,26 @@ def investigate_incident(incident_id: str):
             detail="Security investigation tool failed.",
         ) from exc
 
-    # Create or reuse a local session for this incident
-    existing = find_session_by_incident(incident_id)
+    # Create or reuse a local session for this incident.
+    # Pass target_ip so that sessions created by /api/investigate (which
+    # filter by target_ip) can find and reuse this session instead of
+    # creating a duplicate.
+    resolved_target = source_ip or None
+    existing = find_session_by_incident(incident_id, target_ip=resolved_target)
     if existing:
         local_session = existing
     else:
         local_session = create_session(
             incident_id,
             evidence_snapshot=analysis,
+            **({"target_ip": resolved_target} if resolved_target else {}),
         )
 
     # Keep session metadata consistent with actual investigation
     update_result = update_session(
         local_session["id"],
         evidence_snapshot=analysis,
+        **({"target_ip": resolved_target} if resolved_target else {}),
     )
 
     if not update_result.get("success"):

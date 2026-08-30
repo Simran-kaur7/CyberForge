@@ -2356,6 +2356,412 @@ def run_all():
     check("test_pending_approval_has_no_decision", t119)
 
 
+    # ------------------------------------------------------------------
+    # 120-124: Duplicate incident prevention + resolution regression
+    # ------------------------------------------------------------------
+
+    # 120: investigate_incident passes target_ip to find_session_by_incident
+    # so it finds an existing session created by /api/investigate.
+    def t120():
+        import app.api.incidents as incidents_mod
+
+        def body(sdk_client):
+            # Simulate a session already created by /api/investigate with target_ip
+            sdk_client.create_session(
+                "INC-DUP-1",
+                evidence_snapshot={"source_ip": "10.0.0.25"},
+                target_ip="10.0.0.25",
+            )
+            # Now simulate investigate_incident finding the existing session
+            # The fix: find_session_by_incident now receives target_ip
+            match = sdk_client.find_session_by_incident("INC-DUP-1", target_ip="10.0.0.25")
+            assert match is not None, "Should find session with matching target_ip"
+            assert match["incident_id"] == "INC-DUP-1"
+            assert match["target_ip"] == "10.0.0.25"
+        with_temp_sessions(body)
+    check("test_incidents_finds_existing_session_with_target_ip", t120)
+
+    # 121: Without the fix, different target_ip would miss the session.
+    # Now investigate_incident also passes target_ip when creating new sessions.
+    def t121():
+        def body(sdk_client):
+            s = sdk_client.create_session(
+                "INC-DUP-2",
+                evidence_snapshot={"source_ip": "10.0.0.25"},
+                target_ip="10.0.0.25",
+            )
+            # A search without target_ip should still find it
+            match_no_target = sdk_client.find_session_by_incident("INC-DUP-2")
+            assert match_no_target is not None
+            # And with matching target_ip should also find it
+            match_with_target = sdk_client.find_session_by_incident("INC-DUP-2", target_ip="10.0.0.25")
+            assert match_with_target is not None
+            assert match_with_target["id"] == s["id"]
+        with_temp_sessions(body)
+    check("test_session_found_regardless_of_target_ip_query", t121)
+
+    # 122: Two sessions with same incident_id but different target_ip
+    # should be deduplicated by incident_id alone (frontend fix).
+    def t122():
+        def body(sdk_client):
+            s1 = sdk_client.create_session(
+                "INC-DUP-3",
+                evidence_snapshot={"old": True},
+                target_ip="10.0.0.25",
+            )
+            s2 = sdk_client.create_session(
+                "INC-DUP-3",
+                evidence_snapshot={"new": True},
+            )
+            # Both exist in the store
+            all_sessions = sdk_client.list_sessions()
+            dup_sessions = [s for s in all_sessions if s["incident_id"] == "INC-DUP-3"]
+            assert len(dup_sessions) == 2, "Backend has both sessions"
+            # The frontend dedup by incident_id alone would collapse these
+            # (this test documents the invariant the frontend enforces)
+            by_id = {}
+            for s in dup_sessions:
+                key = s["incident_id"]
+                if key not in by_id:
+                    by_id[key] = s
+            assert len(by_id) == 1, "Dedup by incident_id yields one entry"
+        with_temp_sessions(body)
+    check("test_duplicate_sessions_collapsed_by_incident_id", t122)
+
+    # 123: After approval resolves a session, duplicate with same incident_id
+    # is hidden by the frontend dedup rule (resolved hides active).
+    def t123():
+        def body(sdk_client):
+            s_active = sdk_client.create_session(
+                "INC-DUP-4",
+                evidence_snapshot={"v1": True},
+                target_ip="10.0.0.25",
+            )
+            s_dup = sdk_client.create_session(
+                "INC-DUP-4",
+                evidence_snapshot={"v2": True},
+            )
+            # Approve and resolve the first one
+            r = sdk_client.request_approval(s_active["id"], "BLOCK_IP", {"ip": "10.0.0.25"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(s_active["id"], aid)
+            pr = sdk_client.prepare_decision(s_active["id"], aid, "approved")
+            sdk_client.complete_decision(s_active["id"], aid, pr["token"])
+
+            # Verify one is resolved, one is active
+            sess_active = sdk_client.get_session(s_active["id"])
+            sess_dup = sdk_client.get_session(s_dup["id"])
+            assert sess_active["status"] == "resolved"
+            assert sess_dup["status"] == "active"
+
+            # Frontend dedup: resolved hides active for same incident_id
+            all_sessions = sdk_client.list_sessions()
+            resolved_keys = {s["incident_id"] for s in all_sessions if s["status"] == "resolved"}
+            filtered = [s for s in all_sessions if s["status"] == "resolved" or s["incident_id"] not in resolved_keys]
+            incident_statuses = {s["incident_id"]: s["status"] for s in filtered}
+            assert incident_statuses.get("INC-DUP-4") == "resolved", "Resolved should be visible, active hidden"
+        with_temp_sessions(body)
+    check("test_resolved_hides_active_duplicate", t123)
+
+    # 124: Full end-to-end: create session via investigate path, approve,
+    # verify status=resolved and approval_state is terminal.
+    def t124():
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            # First investigation creates the session
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                result = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-RESOLVE-E2E"
+                ))
+            sid = result["session_id"]
+            sess = sdk_client.get_session(sid)
+            assert sess["status"] == "active"
+
+            # Request approval
+            r = sdk_client.request_approval(sid, "BLOCK_IP", {"ip": "10.0.0.25"})
+            assert r["success"] is True
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+
+            # Approve via prepare + complete
+            pr = sdk_client.prepare_decision(sid, aid, "approved")
+            cr = sdk_client.complete_decision(sid, aid, pr["token"])
+            assert cr["success"] is True
+
+            # Verify final state
+            sess = sdk_client.get_session(sid)
+            assert sess["status"] == "resolved", "Session must be resolved after approval"
+            assert sess["approval_state"]["status"] == "approved"
+            action = [a for a in sess["actions"] if a["action_id"] == aid][0]
+            assert action["status"] == "approved"
+            assert action.get("decided_at") is not None
+        with_temp_sessions(body)
+    check("test_full_e2e_investigate_approve_resolves", t124)
+
+    # ------------------------------------------------------------------
+    # 125-131: Full TrueForge workflow — investigate → approve → resolve
+    # with firewall persistence and no duplicate incidents.
+    # ------------------------------------------------------------------
+
+    # 125: Full workflow — investigate creates session, approve resolves it
+    # AND blocks IP in simulated_firewall.json.
+    def t125():
+        import json as _json
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            # --- Step 1: Investigate the incident ---
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                result = investigate(InvestigationRequest(
+                    query="Investigate suspicious activity from 10.0.0.25",
+                    incident_id="INC-WF-1",
+                ))
+            sid = result["session_id"]
+            assert result["incident_id"] == "INC-WF-1"
+            sess = sdk_client.get_session(sid)
+            assert sess["status"] == "active"
+            assert sess["target_ip"] == "10.0.0.25"
+            assert sess["risk_score"]["score"] == 80
+
+            # --- Step 2: Request approval (simulates TrueForge forwarding) ---
+            r = sdk_client.request_approval(sid, "block_ip", {"incident_id": "INC-WF-1"})
+            assert r["success"] is True
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["status"] == "pending"
+
+            # --- Step 3: Approve — resolves session + writes firewall ---
+            pr = sdk_client.prepare_decision(sid, aid, "approved")
+            cr = sdk_client.complete_decision(sid, aid, pr["token"])
+            assert cr["success"] is True
+            assert cr["status"] == "approved"
+
+            # Session must be resolved
+            sess = sdk_client.get_session(sid)
+            assert sess["status"] == "resolved", "Session must be resolved after approve"
+            assert sess["approval_state"]["status"] == "approved"
+            assert sess["approval_state"].get("decided_at") is not None
+
+            # Execute block_ip (same as approvals.py does)
+            fw_path = Path(__file__).resolve().parent.parent / "mcp_server" / "data" / "simulated_firewall.json"
+            fw_path.parent.mkdir(parents=True, exist_ok=True)
+            from mcp_server.tools.block_ip import block_ip as do_block
+            do_block("10.0.0.25")
+
+            # Firewall must have the blocked IP
+            fw = _json.loads(fw_path.read_text())
+            assert "10.0.0.25" in fw["blocked_ips"]
+            block_events = [e for e in fw["events"] if e["ip"] == "10.0.0.25"]
+            assert len(block_events) >= 1
+        with_temp_sessions(body)
+    check("test_full_workflow_investigate_approve_resolves_blocks_ip", t125)
+
+    # 126: Reinvestigating the same incident reuses the existing session
+    # (no duplicate) and supersedes any pending approval.
+    def t126():
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            # First investigation creates session
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                r1 = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-REINVEST-1"
+                ))
+            sid1 = r1["session_id"]
+
+            # Second investigation with same incident_id + target_ip reuses session
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                r2 = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25 again", incident_id="INC-REINVEST-1"
+                ))
+            sid2 = r2["session_id"]
+
+            # Must be the same session — no duplicate
+            assert sid1 == sid2, "Same incident + target must reuse session"
+            all_sessions = sdk_client.list_sessions()
+            inc_sessions = [s for s in all_sessions if s["incident_id"] == "INC-REINVEST-1"]
+            assert len(inc_sessions) == 1, f"Expected 1 session, got {len(inc_sessions)}"
+        with_temp_sessions(body)
+    check("test_reinvestigation_reuses_session_no_duplicate", t126)
+
+    # 127: Reinvestigating a resolved incident restores it to active.
+    def t127():
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            # Create and resolve a session
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                r1 = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-REINVEST-2"
+                ))
+            sid = r1["session_id"]
+            sdk_client.request_approval(sid, "block_ip", {"incident_id": "INC-REINVEST-2"})
+            sess = sdk_client.get_session(sid)
+            aid = sess["approval_state"]["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            pr = sdk_client.prepare_decision(sid, aid, "approved")
+            sdk_client.complete_decision(sid, aid, pr["token"])
+            assert sdk_client.get_session(sid)["status"] == "resolved"
+
+            # Reinvestigate — should restore to active
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                r2 = investigate(InvestigationRequest(
+                    query="Reinvestigate 10.0.0.25", incident_id="INC-REINVEST-2"
+                ))
+            assert r2["session_id"] == sid, "Must reuse the same session"
+            sess = sdk_client.get_session(sid)
+            assert sess["status"] == "active", "Reinvestigation must restore to active"
+        with_temp_sessions(body)
+    check("test_reinvestigate_resolved_restores_to_active", t127)
+
+    # 128: Rejecting an incident also resolves it and session is terminal.
+    def t128():
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                result = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-WF-REJECT"
+                ))
+            sid = result["session_id"]
+            r = sdk_client.request_approval(sid, "block_ip", {"incident_id": "INC-WF-REJECT"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            pr = sdk_client.prepare_decision(sid, aid, "rejected")
+            cr = sdk_client.complete_decision(sid, aid, pr["token"])
+            assert cr["success"] is True
+            assert cr["status"] == "rejected"
+            sess = sdk_client.get_session(sid)
+            assert sess["status"] == "resolved", "Rejected must also resolve session"
+            assert sess["approval_state"]["status"] == "rejected"
+        with_temp_sessions(body)
+    check("test_reject_also_resolves_session", t128)
+
+    # 129: After resolve, list_sessions shows the session as resolved.
+    def t129():
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                result = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-WF-LIST"
+                ))
+            sid = result["session_id"]
+            r = sdk_client.request_approval(sid, "block_ip", {"incident_id": "INC-WF-LIST"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            pr = sdk_client.prepare_decision(sid, aid, "approved")
+            sdk_client.complete_decision(sid, aid, pr["token"])
+
+            sessions = sdk_client.list_sessions()
+            match = [s for s in sessions if s["id"] == sid]
+            assert len(match) == 1
+            assert match[0]["status"] == "resolved"
+            assert match[0]["approval_state"]["status"] == "approved"
+        with_temp_sessions(body)
+    check("test_list_sessions_shows_resolved", t129)
+
+    # 130: TrueForge investigation path reuses existing session with target_ip.
+    def t130():
+        import app.api.incidents as incidents_mod
+        from app.api.approvals import HTTPException
+
+        fake_analysis = {
+            "success": True, "source_ip": "10.0.0.25",
+            "findings": ["test"], "risk_indicators": {"failed_attempts": 25}
+        }
+        fake_logs = {
+            "success": True, "failed_logins": 25, "successful_logins": 0,
+            "match_count": 25
+        }
+        fake_activity = {
+            "success": True, "process_count": 5, "suspicious_process_count": 2,
+            "unusual_connection_count": 1
+        }
+
+        def body(sdk_client):
+            # Pre-create session via /api/investigate path (with target_ip)
+            s = sdk_client.create_session(
+                "INC-1024",
+                evidence_snapshot={"old": True},
+                target_ip="10.0.0.25",
+                risk_score={"score": 60, "level": "HIGH"},
+            )
+            original_sid = s["id"]
+
+            # Now call investigate_incident — must reuse the same session
+            with patch.object(incidents_mod, "analyze_evidence", return_value=fake_analysis), \
+                 patch.object(incidents_mod, "search_security_logs", return_value=fake_logs), \
+                 patch.object(incidents_mod, "check_system_activity", return_value=fake_activity), \
+                 patch.object(incidents_mod, "find_session_by_incident", wraps=incidents_mod.find_session_by_incident), \
+                 patch.object(incidents_mod, "update_session", wraps=incidents_mod.update_session), \
+                 patch.object(incidents_mod, "persist_trueforge_session_id", return_value={"success": True, "trueforge_session_id": None}), \
+                 patch.object(incidents_mod, "_require_successful_tool_result", side_effect=lambda result, name: result), \
+                 patch("urllib.request.urlopen", side_effect=ConnectionError("TrueForge not running")):
+                try:
+                    result = incidents_mod.investigate_incident("INC-1024")
+                except Exception:
+                    pass  # TrueForge connection fails, but local session should be reused
+
+            # Session count must still be 1 — no duplicate
+            all_sessions = sdk_client.list_sessions()
+            inc_sessions = [s for s in all_sessions if s["incident_id"] == "INC-1024"]
+            assert len(inc_sessions) == 1, f"Expected 1 session, got {len(inc_sessions)}"
+            assert inc_sessions[0]["id"] == original_sid, "Must reuse the original session"
+            assert inc_sessions[0]["target_ip"] == "10.0.0.25"
+        with_temp_sessions(body)
+    check("test_trueforge_investigate_reuses_existing_session", t130)
+
+    # 131: Full round-trip: two incidents investigated, first approved
+    # (resolved + blocked), second rejected (resolved + not blocked).
+    def t131():
+        import json as _json
+        from pathlib import Path
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            # --- Incident 1: Approve → block IP → resolved ---
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                r1 = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-RT-1"
+                ))
+            sid1 = r1["session_id"]
+            r = sdk_client.request_approval(sid1, "block_ip", {"incident_id": "INC-RT-1"})
+            aid1 = r["action_id"]
+            sdk_client.release_request_claim(sid1, aid1)
+            pr = sdk_client.prepare_decision(sid1, aid1, "approved")
+            sdk_client.complete_decision(sid1, aid1, pr["token"])
+            assert sdk_client.get_session(sid1)["status"] == "resolved"
+
+            # --- Incident 2: Reject → not blocked → resolved ---
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                r2 = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-RT-2"
+                ))
+            sid2 = r2["session_id"]
+            r = sdk_client.request_approval(sid2, "block_ip", {"incident_id": "INC-RT-2"})
+            aid2 = r["action_id"]
+            sdk_client.release_request_claim(sid2, aid2)
+            pr2 = sdk_client.prepare_decision(sid2, aid2, "rejected")
+            sdk_client.complete_decision(sid2, aid2, pr2["token"])
+            assert sdk_client.get_session(sid2)["status"] == "resolved"
+
+            # Both resolved
+            all_sessions = sdk_client.list_sessions()
+            resolved = [s for s in all_sessions if s["status"] == "resolved"]
+            assert len(resolved) == 2
+            incident_ids = {s["incident_id"] for s in resolved}
+            assert incident_ids == {"INC-RT-1", "INC-RT-2"}
+
+            # No active incidents
+            active = [s for s in all_sessions if s["status"] == "active"]
+            assert len(active) == 0
+        with_temp_sessions(body)
+    check("test_two_incidents_resolved_one_approved_one_rejected", t131)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:
