@@ -1079,12 +1079,15 @@ PORT  4444</span>
 // ============================================================
   //  FIREWALL STATUS
   // ============================================================
+  var _fwSeq = 0;
   function loadFirewallStatus(targetIp) {
+    var seq = ++_fwSeq;
     fetch(API_BASE + '/api/firewall')
       .then(function (r) { return r.json(); })
       .then(function (fw) {
         var el = document.getElementById('stat-firewall');
         if (!el) return;
+        if (seq !== _fwSeq) return; // stale response, discard
         var blocked = (fw.blocked_ips || []);
         if (targetIp && blocked.indexOf(targetIp) !== -1) {
           el.textContent = 'BLOCKED';
@@ -1098,6 +1101,7 @@ PORT  4444</span>
         }
       })
       .catch(function () {
+        if (seq !== _fwSeq) return; // stale response, discard
         var el = document.getElementById('stat-firewall');
         if (el) el.textContent = '--';
       });
