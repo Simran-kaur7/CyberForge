@@ -776,6 +776,7 @@ def _decide_containment(
         )
 
     tf_event = None
+    tf_forward_failed = False
     if tf_session_id and tool_call_id:
         try:
             tf_event = _forward_decision(
@@ -786,27 +787,18 @@ def _decide_containment(
                 thread_id,
             )
         except Exception:
-            # Broadened beyond RuntimeError so a timeout, connection error, or
-            # any other unexpected failure still fails the decision instead of
-            # leaving it stuck mid-forward.
+            # TrueForge forwarding failed, but the containment may have
+            # already been executed upstream. Log the failure but do NOT
+            # raise — we must still resolve the local session so the
+            # incident moves to Resolved and block_ip runs locally.
             logger.exception(
                 "TrueForge decision forwarding failed for session=%s "
-                "action=%s tool_call_id=%s",
+                "action=%s tool_call_id=%s — completing locally",
                 body.session_id,
                 body.action_id,
                 tool_call_id,
             )
-
-            fail_decision(
-                body.session_id,
-                body.action_id,
-                token,
-                "TrueForge decision forwarding failed",
-            )
-            raise HTTPException(
-                status_code=502,
-                detail="TrueForge decision forwarding failed.",
-            )
+            tf_forward_failed = True
 
     completed = complete_decision(
         body.session_id,
@@ -817,7 +809,7 @@ def _decide_containment(
         raise HTTPException(status_code=409, detail=completed.get("error", "Decision finalization failed"))
 
     # Directly execute block_ip when approved so the firewall file is updated
-    # even if TrueForge is not connected.
+    # even if TrueForge is not connected or its forwarding failed.
     if decision == "approved":
         try:
             from mcp_server.tools.block_ip import block_ip
@@ -841,6 +833,7 @@ def _decide_containment(
         "status": completed["status"],
         "analyst": analyst,
         "trueforge_event": tf_event,
+        "trueforge_forward_failed": tf_forward_failed,
     }
 
 
