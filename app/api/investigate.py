@@ -39,6 +39,7 @@ except ImportError:  # pragma: no cover - lightweight fallback for tests
 
 from agent.agent import run_investigation, _validate_ip
 from app.sdk_client import (
+    claim_orphan_session,
     create_session,
     find_session_by_incident,
     update_session,
@@ -196,6 +197,7 @@ def investigate(body: InvestigationRequest):
 
     if incident_id:
         session_incident_id = incident_id
+        # Try exact target_ip match first
         existing = find_session_by_incident(
             session_incident_id, target_ip=resolved_target
         )
@@ -214,17 +216,14 @@ def investigate(body: InvestigationRequest):
                 query=query,
                 investigation_status=result.get("status", "partial"),
                 tools_used=tools_used,
-                # Reusing this session means its evidence/risk are being
-                # replaced. Any approval still pending was requested against the
-                # previous investigation and is bound to that run's TrueForge
-                # tool call, so retire it in the same write — it must not be
-                # decidable after the state it authorized has changed.
                 supersede_stale_approval=True,
             )
             if not update_result.get("success"):
-                # Persistence is required: this session is the authoritative
-                # local record that later authorizes containment. Never hand
-                # back a usable session_id for state that did not persist.
+                if update_result.get("approval_in_progress"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="An approval operation is in progress; retry after it completes.",
+                    )
                 logger.warning(
                     "Failed to persist investigation into session %s: %s",
                     local_session_id,
@@ -234,9 +233,57 @@ def investigate(body: InvestigationRequest):
                     status_code=503,
                     detail=_PERSISTENCE_FAILURE_DETAIL,
                 )
+        elif incident_id and resolved_target and resolved_target != "unknown":
+            # No exact match — atomically claim an orphan session (no target_ip)
+            # to prevent concurrent investigations from overwriting each other.
+            orphan = claim_orphan_session(
+                session_incident_id, resolved_target,
+                evidence_snapshot=evidence_snapshot,
+                risk_score=risk_score,
+                query=query,
+                investigation_status=result.get("status", "partial"),
+                tools_used=tools_used,
+            )
+            if orphan:
+                local_session_id = orphan["id"]
+                # Supersede any stale approval on the claimed orphan
+                update_result = update_session(
+                    local_session_id,
+                    evidence_snapshot=evidence_snapshot,
+                    risk_score=risk_score,
+                    query=query,
+                    investigation_status=result.get("status", "partial"),
+                    tools_used=tools_used,
+                    supersede_stale_approval=True,
+                )
+                if not update_result.get("success"):
+                    if update_result.get("approval_in_progress"):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="An approval operation is in progress; retry after it completes.",
+                        )
+                    logger.warning(
+                        "Failed to persist investigation into session %s: %s",
+                        local_session_id,
+                        update_result.get("error", "unknown"),
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail=_PERSISTENCE_FAILURE_DETAIL,
+                    )
+            else:
+                # Orphan was claimed by a concurrent request — create new
+                local_session = create_session(
+                    session_incident_id,
+                    evidence_snapshot=evidence_snapshot,
+                    risk_score=risk_score,
+                    target_ip=resolved_target,
+                    query=query,
+                    investigation_status=result.get("status", "partial"),
+                    tools_used=tools_used,
+                )
+                local_session_id = local_session["id"]
         else:
-            # A single locked mutation carrying every field, so a partially
-            # written session can never become the basis for an approval.
             local_session = create_session(
                 session_incident_id,
                 evidence_snapshot=evidence_snapshot,
