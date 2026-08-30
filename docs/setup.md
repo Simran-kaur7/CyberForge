@@ -72,7 +72,7 @@ Make sure the following are installed and verified before you begin:
 ## 1. Clone the Repository
 
 ```bash
-git clone <CYBERFORGE_REPOSITORY_URL>
+git clone <[CyberForge-Repo](https://github.com/Simran-kaur7/CyberForge)>
 cd CyberForge
 ```
 
@@ -184,7 +184,7 @@ The **TrueForge bridge** lives in a **separate project/folder** from the CyberFo
 2. Start it using **that project's** documented command, e.g.:
 
 ```bash
-uvicorn main:app --reload
+uvicorn app.main:app --reload
 ```
 
 3. Use the actual entry point and environment configuration provided by the bridge project.
