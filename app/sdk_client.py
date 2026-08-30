@@ -342,23 +342,35 @@ def find_session_by_incident(iid: str, target_ip: str | None = None):
     incident identifier, otherwise unrelated investigations would collapse
     onto whichever session happens to lack one.
 
-    When ``target_ip`` is supplied, only sessions recorded against that exact
-    target match. Reuse must never join investigations of different targets —
-    they carry independent evidence, risk and approval state.
+    When ``target_ip`` is supplied, an exact-match attempt is made first.
+    If no exact match exists, but a session for this incident has a
+    missing/empty ``target_ip`` (a stale session created before the fix
+    that lacks ``target_ip``), the search falls back to that session so
+    the stale session is reused rather than a duplicate being created.
+    Sessions with a *different* ``target_ip`` are never reused — they
+    carry independent evidence and approval state.
     """
     if not iid or not isinstance(iid, str):
         return None
-    matches = []
+    orphan_matches = []  # sessions with same incident_id but no target_ip
+    exact_matches = []
     for s in _read_sessions():
         if not isinstance(s, dict) or s.get("incident_id") != iid:
             continue
-        if target_ip is not None and (s.get("target_ip") or "") != target_ip:
-            continue
-        matches.append(s)
-    if not matches:
+        if target_ip is not None:
+            stored = s.get("target_ip") or ""
+            if stored == target_ip:
+                exact_matches.append(s)
+            elif not stored:
+                orphan_matches.append(s)
+        else:
+            orphan_matches.append(s)
+    # Prefer exact target_ip match; fall back to orphan (no target_ip) sessions
+    candidates = exact_matches or orphan_matches
+    if not candidates:
         return None
     return sorted(
-        matches, key=lambda s: s.get("created_at") or "", reverse=True
+        candidates, key=lambda s: s.get("created_at") or "", reverse=True
     )[0]
 
 

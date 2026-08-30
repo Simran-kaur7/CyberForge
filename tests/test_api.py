@@ -2788,6 +2788,58 @@ def run_all():
         with_temp_sessions(body)
     check("test_two_incidents_resolved_one_approved_one_rejected", t131)
 
+    # ------------------------------------------------------------------
+    # 132-133: Stale session fallback — session without target_ip is reused
+    # ------------------------------------------------------------------
+
+    # 132: investigate with target_ip reuses a stale session that has no target_ip
+    def t132():
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            # Simulate a stale session created before the fix (no target_ip)
+            stale = sdk_client.create_session(
+                "INC-STALE-1",
+                evidence_snapshot={"old": True},
+            )
+            assert stale.get("target_ip") is None, "Stale session must have no target_ip"
+
+            # Investigate with target_ip — should reuse stale, not create duplicate
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                r = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-STALE-1"
+                ))
+            assert r["session_id"] == stale["id"], "Must reuse the stale session"
+
+            sessions = sdk_client.list_sessions()
+            inc = [s for s in sessions if s["incident_id"] == "INC-STALE-1"]
+            assert len(inc) == 1, f"No duplicate: expected 1 session, got {len(inc)}"
+            assert inc[0]["target_ip"] == "10.0.0.25", "target_ip should be updated"
+        with_temp_sessions(body)
+    check("test_stale_session_without_target_ip_is_reused", t132)
+
+    # 133: find_session_by_incident fallback: exact match preferred, incident-id fallback works
+    def t133():
+        def body(sdk_client):
+            s1 = sdk_client.create_session("INC-FB-1", evidence_snapshot={"a": 1}, target_ip="10.0.0.25")
+            s2 = sdk_client.create_session("INC-FB-1", evidence_snapshot={"b": 2})
+
+            # Exact match available → returns it
+            found = sdk_client.find_session_by_incident("INC-FB-1", target_ip="10.0.0.25")
+            assert found["id"] == s1["id"]
+
+            # No exact match for different target → falls back to incident-id match
+            found2 = sdk_client.find_session_by_incident("INC-FB-1", target_ip="192.168.1.50")
+            assert found2 is not None, "Fallback must find a session"
+            # Returns newest by created_at
+            assert found2["id"] == s2["id"] or found2["id"] == s1["id"]
+
+            # No target_ip → matches all incident-id sessions
+            found3 = sdk_client.find_session_by_incident("INC-FB-1")
+            assert found3 is not None
+        with_temp_sessions(body)
+    check("test_find_session_fallback_when_no_exact_target_match", t133)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:
