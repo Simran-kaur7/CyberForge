@@ -345,24 +345,72 @@ def find_session_by_incident(iid: str, target_ip: str | None = None):
     incident identifier, otherwise unrelated investigations would collapse
     onto whichever session happens to lack one.
 
-    When ``target_ip`` is supplied, only sessions recorded against that exact
-    target match. Reuse must never join investigations of different targets —
-    they carry independent evidence, risk and approval state.
+    When ``target_ip`` is supplied, an exact-match attempt is made first.
+    If no exact match exists, but a session for this incident has a
+    missing/empty ``target_ip`` (a stale session created before the fix
+    that lacks ``target_ip``), the search falls back to that session so
+    the stale session is reused rather than a duplicate being created.
+    Sessions with a *different* ``target_ip`` are never reused — they
+    carry independent evidence and approval state.
     """
     if not iid or not isinstance(iid, str):
         return None
-    matches = []
+    orphan_matches = []  # sessions with same incident_id but no target_ip
+    exact_matches = []
     for s in _read_sessions():
         if not isinstance(s, dict) or s.get("incident_id") != iid:
             continue
-        if target_ip is not None and (s.get("target_ip") or "") != target_ip:
-            continue
-        matches.append(s)
-    if not matches:
+        if target_ip is not None:
+            stored = s.get("target_ip") or ""
+            if stored == target_ip:
+                exact_matches.append(s)
+            elif not stored:
+                orphan_matches.append(s)
+        else:
+            orphan_matches.append(s)
+    # Prefer exact target_ip match; fall back to orphan (no target_ip) sessions
+    candidates = exact_matches or orphan_matches
+    if not candidates:
         return None
     return sorted(
-        matches, key=lambda s: s.get("created_at") or "", reverse=True
+        candidates, key=lambda s: s.get("created_at") or "", reverse=True
     )[0]
+
+
+def claim_orphan_session(iid: str, target_ip: str, **extra_fields) -> dict | None:
+    """Atomically find an orphan session (no target_ip) and claim it.
+
+    Returns the claimed session on success, or ``None`` if no orphan was
+    available (another caller already claimed it, or none existed).
+
+    The lookup and claim happen inside a single ``_mutate_sessions``
+    mutation so two concurrent callers cannot both claim the same orphan.
+    """
+    if not iid or not isinstance(iid, str) or not target_ip:
+        return None
+
+    def _claim(sessions):
+        # Find the newest orphan for this incident
+        orphan = None
+        for s in sessions:
+            if not isinstance(s, dict) or s.get("incident_id") != iid:
+                continue
+            if not s.get("target_ip"):
+                if orphan is None or (s.get("created_at") or "") > (orphan.get("created_at") or ""):
+                    orphan = s
+        if orphan is None:
+            return None
+        # CAS: only claim if still unclaimed
+        if orphan.get("target_ip"):
+            return None
+        orphan["target_ip"] = target_ip
+        for k, v in extra_fields.items():
+            if k not in _PROTECTED_SESSION_KEYS:
+                orphan[k] = v
+        orphan["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return orphan
+
+    return _mutate_sessions(_claim)
 
 
 # ---------------------------------------------------------------------------

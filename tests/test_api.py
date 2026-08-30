@@ -2788,6 +2788,118 @@ def run_all():
         with_temp_sessions(body)
     check("test_two_incidents_resolved_one_approved_one_rejected", t131)
 
+    # ------------------------------------------------------------------
+    # 132-133: Stale session fallback — session without target_ip is reused
+    # ------------------------------------------------------------------
+
+    # 132: investigate with target_ip reuses a stale session that has no target_ip
+    def t132():
+        from app.api.investigate import investigate, InvestigationRequest
+
+        def body(sdk_client):
+            # Simulate a stale session created before the fix (no target_ip)
+            stale = sdk_client.create_session(
+                "INC-STALE-1",
+                evidence_snapshot={"old": True},
+            )
+            assert stale.get("target_ip") is None, "Stale session must have no target_ip"
+
+            # Investigate with target_ip — should reuse stale, not create duplicate
+            with patch("app.api.investigate.run_investigation", return_value=make_fake_result()):
+                r = investigate(InvestigationRequest(
+                    query="Investigate 10.0.0.25", incident_id="INC-STALE-1"
+                ))
+            assert r["session_id"] == stale["id"], "Must reuse the stale session"
+
+            sessions = sdk_client.list_sessions()
+            inc = [s for s in sessions if s["incident_id"] == "INC-STALE-1"]
+            assert len(inc) == 1, f"No duplicate: expected 1 session, got {len(inc)}"
+            assert inc[0]["target_ip"] == "10.0.0.25", "target_ip should be updated"
+        with_temp_sessions(body)
+    check("test_stale_session_without_target_ip_is_reused", t132)
+
+    # 133: find_session_by_incident fallback: exact match preferred, incident-id fallback works
+    def t133():
+        def body(sdk_client):
+            s1 = sdk_client.create_session("INC-FB-1", evidence_snapshot={"a": 1}, target_ip="10.0.0.25")
+            s2 = sdk_client.create_session("INC-FB-1", evidence_snapshot={"b": 2})
+
+            # Exact match available → returns it
+            found = sdk_client.find_session_by_incident("INC-FB-1", target_ip="10.0.0.25")
+            assert found["id"] == s1["id"]
+
+            # No exact match for different target → falls back to orphan only
+            found2 = sdk_client.find_session_by_incident("INC-FB-1", target_ip="192.168.1.50")
+            assert found2 is not None, "Fallback must find a session"
+            # Must return the orphan (no target_ip), NOT s1 (different target)
+            assert found2["id"] == s2["id"], f"Must return orphan s2, got {found2['id']}"
+            assert found2.get("target_ip") is None or found2.get("target_ip") == ""
+
+            # No target_ip → matches all incident-id sessions
+            found3 = sdk_client.find_session_by_incident("INC-FB-1")
+            assert found3 is not None
+        with_temp_sessions(body)
+    check("test_find_session_fallback_when_no_exact_target_match", t133)
+
+    # 134: claim_orphan_session atomically claims and sets target_ip
+    def t134():
+        def body(sdk_client):
+            orphan = sdk_client.create_session("INC-CLAIM-1", evidence_snapshot={"stale": True})
+            assert orphan.get("target_ip") is None
+
+            claimed = sdk_client.claim_orphan_session("INC-CLAIM-1", "10.0.0.25")
+            assert claimed is not None, "Should claim the orphan"
+            assert claimed["id"] == orphan["id"]
+            assert claimed["target_ip"] == "10.0.0.25"
+
+            # Second claim returns None — orphan already claimed
+            claimed2 = sdk_client.claim_orphan_session("INC-CLAIM-1", "192.168.1.50")
+            assert claimed2 is None, "Must not claim already-claimed session"
+
+            # Original session was updated in place
+            sess = sdk_client.get_session(orphan["id"])
+            assert sess["target_ip"] == "10.0.0.25"
+        with_temp_sessions(body)
+    check("test_claim_orphan_session_atomic", t134)
+
+    # ------------------------------------------------------------------
+    # 135: TF forwarding failure => block_ip NOT called, action retryable
+    # ------------------------------------------------------------------
+    def t135():
+        from app.api.approvals import _decide_containment, DecisionRequest
+        from unittest.mock import patch as _patch
+
+        def body(sdk_client):
+            s = sdk_client.create_session("INC-TF-FWFAIL")
+            sid = s["id"]
+            sdk_client.update_session(sid, target_ip="10.0.0.25")
+            sdk_client.persist_trueforge_session_id(sid, "tf-fwfail")
+            r = sdk_client.request_approval(sid, "block_ip", {"incident_id": "INC-TF-FWFAIL"})
+            aid = r["action_id"]
+            sdk_client.release_request_claim(sid, aid)
+            sdk_client.set_approval_tool_call_id(sid, aid, "tc-fwfail")
+
+            with _patch("app.api.approvals._forward_decision", side_effect=RuntimeError("TF down")):
+                with _patch("app.api.approvals._best_effort_block_ip") as mock_bip:
+                    result = _decide_containment(
+                        DecisionRequest(
+                            session_id=sid, action_id=aid,
+                            tool_call_id="tc-fwfail", trueforge_session_id="tf-fwfail",
+                            decided_by="analyst",
+                        ),
+                        "analyst", "approved",
+                    )
+                    mock_bip.assert_not_called()
+
+            assert result["success"] is False
+            assert result["retryable"] is True
+            assert result["status"] == "pending"
+            sess = sdk_client.get_session(sid)
+            assert sess["approval_state"]["status"] == "pending"
+            assert sess.get("contained_at") is None
+        with_temp_sessions(body)
+    check("test_tf_forwarding_failure_no_block_ip", t135)
+
     print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
     if errors:

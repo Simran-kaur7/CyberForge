@@ -722,6 +722,61 @@ def _forward_decision(
     )
 
 
+def _best_effort_block_ip(session_id: str) -> dict:
+    """Execute block_ip locally as a best-effort firewall update.
+
+    Returns a dict with:
+      - containment_status: "executed" | "failed" | "target_unresolvable"
+      - contained_ip: the IP that was targeted (if any)
+      - block_error: error message if block_ip failed (if any)
+    """
+    try:
+        from mcp_server.tools.block_ip import block_ip
+        import json as _json, pathlib as _pathlib, re as _re
+        from app.sdk_client import get_session as _get
+
+        session = _get(session_id)
+        if not session:
+            return {"containment_status": "target_unresolvable", "contained_ip": None}
+
+        target_ip = session.get("target_ip")
+        # Fallback: extract IP from evidence_snapshot
+        if not target_ip or target_ip == "unknown":
+            ev = session.get("evidence_snapshot", {})
+            if isinstance(ev, dict):
+                target_ip = ev.get("source_ip") or ev.get("target_ip")
+        # Fallback: extract IP from query text
+        if not target_ip or target_ip == "unknown":
+            q = session.get("query") or ""
+            m = _re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", q)
+            if m:
+                target_ip = m.group(1)
+
+        if not target_ip or target_ip == "unknown":
+            return {"containment_status": "target_unresolvable", "contained_ip": None}
+
+        block_result = block_ip(target_ip)
+        if not block_result.get("success"):
+            return {
+                "containment_status": "failed",
+                "contained_ip": target_ip,
+                "block_error": block_result.get("error", "block_ip returned success=false"),
+            }
+
+        # Record containment in the session so frontend reflects it
+        from app.sdk_client import update_session as _upd
+        from datetime import datetime as _dt, timezone as _tz
+        _upd(
+            session_id,
+            contained_at=_dt.now(_tz.utc).isoformat(),
+            contained_ip=target_ip,
+            containment_action="block_ip",
+        )
+        return {"containment_status": "executed", "contained_ip": target_ip}
+    except Exception as exc:
+        return {"containment_status": "failed", "contained_ip": None, "block_error": str(exc)}
+
+
 def _decide_containment(
     body: DecisionRequest,
     analyst: str,
@@ -786,9 +841,10 @@ def _decide_containment(
                 thread_id,
             )
         except Exception:
-            # Broadened beyond RuntimeError so a timeout, connection error, or
-            # any other unexpected failure still fails the decision instead of
-            # leaving it stuck mid-forward.
+            # TrueForge forwarding failed — the action must remain
+            # pending/retryable. Do NOT call complete_decision or
+            # block_ip: the upstream tool call may still be pending
+            # and a retry must be possible.
             logger.exception(
                 "TrueForge decision forwarding failed for session=%s "
                 "action=%s tool_call_id=%s",
@@ -796,17 +852,22 @@ def _decide_containment(
                 body.action_id,
                 tool_call_id,
             )
-
             fail_decision(
                 body.session_id,
                 body.action_id,
                 token,
                 "TrueForge decision forwarding failed",
             )
-            raise HTTPException(
-                status_code=502,
-                detail="TrueForge decision forwarding failed.",
-            )
+            return {
+                "success": False,
+                "action_id": body.action_id,
+                "session_id": body.session_id,
+                "status": "pending",
+                "analyst": analyst,
+                "trueforge_event": tf_event,
+                "error": "TrueForge decision forwarding failed; retryable.",
+                "retryable": True,
+            }
 
     completed = complete_decision(
         body.session_id,
@@ -816,45 +877,10 @@ def _decide_containment(
     if not completed.get("success"):
         raise HTTPException(status_code=409, detail=completed.get("error", "Decision finalization failed"))
 
-    # Directly execute block_ip when approved so the firewall file is updated
-    # even if TrueForge is not connected.
+    # Execute block_ip when approved so the firewall file is updated.
+    containment = {"containment_status": "not_needed"}
     if decision == "approved":
-        try:
-            from mcp_server.tools.block_ip import block_ip
-            import json as _json, pathlib as _pathlib, re as _re
-            target_ip = None
-            sessions_file = _pathlib.Path(__file__).resolve().parent.parent.parent / "mcp_server" / "data" / "sessions.json"
-            if sessions_file.exists():
-                sessions = _json.loads(sessions_file.read_text())
-                for s in sessions:
-                    if s.get("id") == body.session_id:
-                        target_ip = s.get("target_ip")
-                        # Fallback: extract IP from evidence_snapshot
-                        if not target_ip or target_ip == "unknown":
-                            ev = s.get("evidence_snapshot", {})
-                            if isinstance(ev, dict):
-                                target_ip = ev.get("source_ip") or ev.get("target_ip")
-                        # Fallback: extract IP from query text
-                        if not target_ip or target_ip == "unknown":
-                            q = s.get("query") or ""
-                            m = _re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", q)
-                            if m:
-                                target_ip = m.group(1)
-                        break
-            if target_ip and target_ip != "unknown":
-                block_result = block_ip(target_ip)
-                # Record containment in the session so frontend reflects it
-                if block_result.get("success"):
-                    from app.sdk_client import update_session as _upd
-                    from datetime import datetime as _dt, timezone as _tz
-                    _upd(
-                        body.session_id,
-                        contained_at=_dt.now(_tz.utc).isoformat(),
-                        contained_ip=target_ip,
-                        containment_action="block_ip",
-                    )
-        except Exception:
-            pass  # Best effort
+        containment = _best_effort_block_ip(body.session_id)
 
     return {
         "success": True,
@@ -862,6 +888,7 @@ def _decide_containment(
         "status": completed["status"],
         "analyst": analyst,
         "trueforge_event": tf_event,
+        **containment,
     }
 
 
