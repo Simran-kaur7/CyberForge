@@ -1109,6 +1109,16 @@ PORT  4444</span>
   loadExistingSession().then(function () {
     loadPrevious();
   });
+
+  // Periodically refresh firewall status to reflect TrueForge changes
+  setInterval(function () {
+    var fwTarget = investigationData && investigationData.target_ip && investigationData.target_ip !== 'unknown'
+      ? investigationData.target_ip : null;
+    if (!fwTarget) {
+      fwTarget = document.getElementById('target-input').value.trim() || null;
+    }
+    if (fwTarget) loadFirewallStatus(fwTarget);
+  }, 5000);
   bindReticle();
 </script>
 

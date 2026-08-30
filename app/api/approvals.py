@@ -821,7 +821,7 @@ def _decide_containment(
     if decision == "approved":
         try:
             from mcp_server.tools.block_ip import block_ip
-            import json as _json, pathlib as _pathlib
+            import json as _json, pathlib as _pathlib, re as _re
             target_ip = None
             sessions_file = _pathlib.Path(__file__).resolve().parent.parent.parent / "mcp_server" / "data" / "sessions.json"
             if sessions_file.exists():
@@ -829,6 +829,17 @@ def _decide_containment(
                 for s in sessions:
                     if s.get("id") == body.session_id:
                         target_ip = s.get("target_ip")
+                        # Fallback: extract IP from evidence_snapshot
+                        if not target_ip or target_ip == "unknown":
+                            ev = s.get("evidence_snapshot", {})
+                            if isinstance(ev, dict):
+                                target_ip = ev.get("source_ip") or ev.get("target_ip")
+                        # Fallback: extract IP from query text
+                        if not target_ip or target_ip == "unknown":
+                            q = s.get("query") or ""
+                            m = _re.search(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", q)
+                            if m:
+                                target_ip = m.group(1)
                         break
             if target_ip and target_ip != "unknown":
                 block_ip(target_ip)
