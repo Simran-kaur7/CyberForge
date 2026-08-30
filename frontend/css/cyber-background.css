@@ -18,10 +18,3 @@
 @keyframes cyberDataDrift{0%,100%{opacity:.2;transform:translateY(0)}50%{opacity:.65;transform:translateY(-12px)}}
 @media(prefers-reduced-motion:reduce){.cyber-bg-layer::before,.cyber-bg-layer::after,.cyber-node,.cyber-node::before,.cyber-node::after,.cyber-signal,.cyber-data{animation:none!important}.cyber-bg-layer{opacity:.5}}
 @media(pointer:coarse){.cyber-bg-layer{opacity:.58}}
-
-/* Transparent scanner cursor center: preserve the orange hex outline while keeping underlying content readable. */
-.reticle-ring{background:transparent!important;border:2px solid var(--ember)!important}
-.reticle-ring::before{background:transparent!important}
-.reticle.active .reticle-ring{background:transparent!important;border-color:var(--ember)!important}
-.reticle.risk .reticle-ring{background:transparent!important;border-color:var(--red)!important}
-.reticle.ok .reticle-ring{background:transparent!important;border-color:var(--ok)!important}
