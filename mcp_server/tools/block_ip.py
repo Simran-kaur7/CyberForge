@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -60,7 +60,7 @@ def block_ip(ip_address: str) -> dict:
         blocked_ips.append(ip_address)
 
     events.append({
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(timezone(timedelta(hours=5, minutes=30))).isoformat(),
         "action": "BLOCK_IP",
         "ip": ip_address,
         "mode": "SIMULATED"

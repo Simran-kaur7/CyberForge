@@ -58,3 +58,4 @@ audit_logs/
 evidence/
 *.lock
 sessions.json
+simulated_firewall.json
