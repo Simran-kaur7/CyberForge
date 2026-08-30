@@ -330,6 +330,9 @@ def list_sessions() -> list:
             "target_ip": s.get("target_ip"),
             "query": s.get("query"),
             "tools_used": s.get("tools_used"),
+            "contained_at": s.get("contained_at"),
+            "contained_ip": s.get("contained_ip"),
+            "containment_action": s.get("containment_action"),
         }
         for s in _read_sessions()
     ]
@@ -1099,6 +1102,10 @@ def update_session(sid: str, *, supersede_stale_approval: bool = False, **kw) ->
                 # and the incident page can initiate another approval.
                 if supersede_stale_approval and s.get("status") == "resolved":
                     s["status"] = "active"
+                    # Clear stale containment metadata from previous cycle
+                    s.pop("contained_at", None)
+                    s.pop("contained_ip", None)
+                    s.pop("containment_action", None)
                 s["updated_at"] = datetime.now(timezone.utc).isoformat()
                 result = {"success": True, "session": s}
                 if superseded_action_id:

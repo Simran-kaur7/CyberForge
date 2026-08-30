@@ -724,11 +724,10 @@ PORT  4444</span>
         // Refresh firewall status after decision
         var fwTarget = investigationData && investigationData.target_ip && investigationData.target_ip !== 'unknown' ? investigationData.target_ip : null;
         if (decision === 'approve') {
-          // Immediately show BLOCKED for the approved target
+          // Show pending until block_ip actually executes
           var fwEl = document.getElementById('stat-firewall');
-          if (fwEl && fwTarget) { fwEl.textContent = 'BLOCKED'; fwEl.style.color = '#ff4d4d'; }
-          // Also refresh from file after TrueForge block_ip executes
-          // Do not refresh from file here - it overwrites BLOCKED before block_ip writes
+          if (fwEl) { fwEl.textContent = 'Containment pending'; fwEl.style.color = '#ff8a3d'; }
+          // The 5s periodic refresh will update to BLOCKED once block_ip writes to file
         } else {
           // After rejection, show Not Blocked in firewall stat
           var fwEl = document.getElementById('stat-firewall');
