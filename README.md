@@ -184,16 +184,23 @@ python mcp_server/tools/block_ip.py
 
 ## Running the demo (~3 minutes)
 
-1. **Introduce CyberForge** — one line: an AI SOC agent that correlates evidence and recommends containment, with a human approving the final action.
-2. **Show the incident** — open `INC-1024`: an SSH brute-force sequence from `10.0.0.25`.
-3. **Run the agent** — trigger `analyze_evidence` (via TrueForge or directly) against `INC-1024`.
-4. **Show investigation/evidence correlation** — walk through the authentication, host, and network signals side by side (`incident_evidence_correlation.svg`).
-5. **Show the timeline** — the correlated signal chain (`incident_signal_chain.svg`) showing how the events connect into one narrative.
-6. **Show human approval** — the point where the agent's recommendation is presented and a human explicitly approves the containment action.
-7. **Show progression after approval** — `block_ip` is called and recorded.
-8. **Show the resulting action** — the recorded, simulated containment entry produced by `block_ip`.
-9. **Show the final result** — confirm the incident evidence, the recommendation, and the approved action all line up, closing the loop.
+1. **Introduce CyberForge** — an AI SOC agent that investigates security incidents, correlates evidence, and recommends containment while keeping the final decision with a human analyst.
 
+2. **Show the incident** — open `INC-1024`, an SSH brute-force sequence associated with `10.0.0.25`.
+
+3. **Run the investigation** — start the CyberForge agent through the TrueForge harness and allow it to investigate the incident using the MCP tools.
+
+4. **Show evidence correlation** — demonstrate how authentication, host/process, and network signals are combined into a single incident narrative.
+
+5. **Show the investigation timeline** — demonstrate the progression from initial signals through assessment and recommendation.
+
+6. **Show human approval** — the agent presents the recommended containment action and waits for explicit analyst approval.
+
+7. **Show progression after approval** — approve the action and demonstrate that the investigation timeline continues into containment and post-incident stages.
+
+8. **Show the containment result** — demonstrate the recorded simulated `block_ip` action and its resulting local firewall state.
+
+9. **Close the loop** — show the final investigation state and explain how the evidence, recommendation, human decision, and resulting action remain connected and auditable.
 ## Project structure
 
 ```text
@@ -212,9 +219,13 @@ CyberForge/
 
 CyberForge used Qodo Code Review during development.
 
-### Representative reviewed PR
+### Representative Qodo-reviewed PR
 
-- [fix: address qodo review findings](https://github.com/Simran-kaur7/CyberForge/pull/3) — merged PR addressing findings raised by Qodo Code Review.
+- [fix: address qodo review findings](https://github.com/Simran-kaur7/CyberForge/pull/7) — merged PR containing fixes based on Qodo Code Review findings.
+
+### Project development history
+
+- [View all closed pull requests](https://github.com/Simran-kaur7/CyberForge/pulls?q=is%3Apr+is%3Aclosed) — full PR history and development progression.
 
 ## Reproducibility
 
